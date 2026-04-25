@@ -49,6 +49,7 @@ export interface Meta {
   id: string;
   type: string;
   name: string;
+  aliases?: string[];
   poster?: string;
   posterShape?: 'poster' | 'landscape' | 'square';
   background?: string;
@@ -101,4 +102,11 @@ export interface Provider {
   search?(query: string, type: string): Promise<MediaItem[]>;
   getCatalog?(type: string, extra: any): Promise<Meta[]>;
   getMeta?(id: string, type: string): Promise<Meta | null>;
+  /**
+   * Given an agg: stream ID originating from this provider, resolve it into
+   * a MediaItem (title, aliases, episode, season) so other providers can
+   * search for the same content. Called by the aggregator before fanning out
+   * getStreams to all providers.
+   */
+  resolveMediaItem?(id: string, type: string): Promise<MediaItem | null>;
 }

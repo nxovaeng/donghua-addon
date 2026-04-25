@@ -1,7 +1,6 @@
 import { addonBuilder } from 'stremio-addon-sdk';
 import { aggregator } from './core/aggregator';
 import { metadataService } from './core/metadataService';
-import { getDonghuafunCatalog, getDonghuafunMeta, getDonghuafunStreams } from './providers/donghuafun';
 
 const manifest = {
   id: 'community.aggregator.node',
@@ -14,13 +13,16 @@ const manifest = {
     'catalog'
   ],
   types: ['movie', 'series'],
-  idPrefixes: ['tt', 'bgm', 'dhf:', 'agg:'],
+  idPrefixes: ['tt', 'bgm', 'agg:'],
   catalogs: [
     {
       type: 'series',
       id: 'donghua_hot',
       name: '热门国漫',
-      extra: [{ name: 'search', isRequired: false }]
+      extra: [
+        { name: 'search', isRequired: false },
+        { name: 'skip', isRequired: false }
+      ]
     }
   ]
 };
@@ -30,32 +32,12 @@ const builder = new addonBuilder(manifest);
 
 builder.defineStreamHandler(async ({ type, id }) => {
   console.log(`[Addon] Stream request: ${type} ${id}`);
-
-  // Handle dhf: IDs — format: dhf:<vodId>:<dmVideoId>
-  if (id.startsWith('dhf:')) {
-    const parts = id.split(':');
-    if (parts.length < 3) return { streams: [] };
-    const vodId = parts[1];
-    const dmVideoId = parts[2];
-    const streams = await getDonghuafunStreams(vodId, dmVideoId);
-    return { streams };
-  }
-
-  // Handle IMDB/BGM IDs through the aggregator
   const streams = await aggregator.getStreams(type, id);
   return { streams };
 });
 
 builder.defineMetaHandler(async ({ type, id }) => {
   console.log(`[Addon] Meta request: ${type} ${id}`);
-
-  // Handle dhf: IDs
-  if (id.startsWith('dhf:')) {
-    const vodId = id.replace('dhf:', '').split(':')[0];
-    const meta = await getDonghuafunMeta(vodId);
-    if (!meta) return { meta: null };
-    return { meta };
-  }
 
   // Handle agg: IDs
   if (id.startsWith('agg:')) {
@@ -73,7 +55,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
       id: meta.id,
       type: meta.type,
       name: meta.title,
-      poster: '', 
+      poster: '',
       background: '',
       description: '',
     }

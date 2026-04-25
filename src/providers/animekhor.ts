@@ -2,6 +2,7 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { Provider, MediaItem, Stream, Meta } from '../types';
 import { resolveEmbed } from '../utils/embedResolver';
+import { db } from '../utils/db';
 
 const SITE_CONFIG = {
     id: 'animekhor',
@@ -55,14 +56,17 @@ const animekhorProvider: Provider = {
         }
 
         try {
-            const res = await axios.get(SITE_CONFIG.mainUrl, { headers: DEFAULT_HEADERS, timeout: 10000 });
+            const skip = parseInt(extra?.skip || '0') || 0;
+            const page = Math.floor(skip / 20) + 1;
+            const popularUrl = `${SITE_CONFIG.mainUrl}/anime/?sub=&order=popular&page=${page}`;
+            const res = await axios.get(popularUrl, { headers: DEFAULT_HEADERS, timeout: 10000 });
             const $ = cheerio.load(res.data);
             const metas: any[] = [];
             $('div.listupd > article').each((_, el) => {
                 const link = $(el).find('div.bsx > a');
                 const title = link.attr('title') || link.text().trim();
                 const href = link.attr('href') || '';
-                const poster = $(el).find('img').attr('src');
+                const poster = $(el).find('img').attr('src') || $(el).find('img').attr('data-src');
                 if (title && href) {
                     metas.push({
                         id: `agg:${SITE_CONFIG.id}:${href}`,
@@ -72,6 +76,7 @@ const animekhorProvider: Provider = {
                     });
                 }
             });
+            console.log(`[Animekhor] Popular catalog: ${metas.length} items`);
             return metas;
         } catch (err) {
             console.error(`[Animekhor] Catalog error:`, err);
@@ -79,7 +84,42 @@ const animekhorProvider: Provider = {
         }
     },
 
+    async resolveMediaItem(id: string, type: string): Promise<MediaItem | null> {
+        // id format: agg:animekhor:<internalId>  where internalId is a URL
+        const prefix = `agg:${SITE_CONFIG.id}:`;
+        if (!id.startsWith(prefix)) return null;
+        const internalId = id.slice(prefix.length);
+
+        // Extract episode number from URL slug
+        // e.g. "https://animekhor.org/perfect-world-episode-264-subtitles-..."
+        let episodeNum: number | undefined;
+        const epMatch = internalId.match(/episode[- _](\d+)/i);
+        if (epMatch) episodeNum = parseInt(epMatch[1]);
+
+        // Fetch meta to get title + aliases (uses cache if available)
+        const meta = this.getMeta ? await this.getMeta(internalId, type).catch(() => null) : null;
+        const rawTitle = meta?.name || '';
+        const aliases: string[] = meta?.aliases ? [...meta.aliases] : [];
+
+        // Clean episode suffix from title
+        const title = rawTitle.replace(/\s+episode\s+\d+.*/i, '').replace(/\s+ep\.?\s*\d+.*/i, '').trim();
+        if (rawTitle !== title) aliases.push(rawTitle);
+
+        return {
+            id,
+            type: type as any,
+            title,
+            aliases,
+            season: 1,
+            episode: episodeNum,
+        };
+    },
+
     async getMeta(id: string, type: string): Promise<Meta | null> {
+        const cacheKey = `meta:agg:${SITE_CONFIG.id}:${id}`;
+        const cached = db.get(cacheKey) as Meta | null;
+        if (cached) return cached;
+
         try {
             const res = await axios.get(id, { headers: DEFAULT_HEADERS, timeout: 10000 });
             const $ = cheerio.load(res.data);
@@ -89,6 +129,12 @@ const animekhorProvider: Provider = {
             const background = $('div.bigcontent').attr('style')?.match(/url\(['"]?([^'"]+)['"]?\)/)?.[1];
             const description = $('div.entry-content').text().trim();
 
+            // Extract all aliases from span.alter (e.g. "Perfect World, 完美世界, Wanmei Shijie")
+            const alterText = $('span.alter').text().trim();
+            const aliases = alterText
+                ? alterText.split(',').map(s => s.trim()).filter(s => s && s !== title)
+                : [];
+
             const meta: any = {
                 id: `agg:${SITE_CONFIG.id}:${id}`,
                 type: 'series',
@@ -96,6 +142,7 @@ const animekhorProvider: Provider = {
                 poster: poster,
                 background: background,
                 description: description,
+                aliases,
                 videos: []
             };
 
@@ -107,21 +154,42 @@ const animekhorProvider: Provider = {
 
                 $ep('div.episodelist > ul > li').each((i, el) => {
                     const epLink = $ep(el).find('a');
-                    const rawText = epLink.find('span').text().trim();
+
+                    const playinfoSpan = epLink.find('.playinfo span').text().trim();
+                    const rawText = playinfoSpan || epLink.find('span').text().trim() || epLink.text().trim();
                     const epNumMatch = rawText.match(/(\d+)/);
                     const epNum = epNumMatch ? parseInt(epNumMatch[1]) : i + 1;
                     const href = epLink.attr('href');
+
+                    let dateText = epLink.find('.epl-date').text().trim();
+                    if (!dateText && playinfoSpan) {
+                        const parts = playinfoSpan.split('-');
+                        if (parts.length > 1) {
+                            dateText = parts[parts.length - 1].trim();
+                        }
+                    }
+
+                    let released: string;
+                    try {
+                        const parsedDate = new Date(dateText);
+                        released = (dateText && !isNaN(parsedDate.getTime()))
+                            ? parsedDate.toISOString()
+                            : new Date(epNum * 86400000).toISOString();
+                    } catch (e) {
+                        released = new Date(epNum * 86400000).toISOString();
+                    }
 
                     meta.videos.push({
                         id: `agg:${SITE_CONFIG.id}:${href}`,
                         title: `Episode ${epNum}`,
                         season: 1,
                         episode: epNum,
-                        released: new Date().toISOString(), // Fallback
+                        released,
                     });
                 });
             }
 
+            db.set(cacheKey, meta, 3600);
             return meta;
         } catch (err) {
             console.error(`[Animekhor] getMeta error:`, err);
@@ -134,12 +202,38 @@ const animekhorProvider: Provider = {
         console.log(`[Animekhor] Requesting streams for: ${item.title}${epLog} (ID: ${item.id})`);
 
         try {
-            let detailUrl = '';
+            let watchUrl = '';
 
-            // Handle agg: IDs (direct meta from our catalog)
             if (item.id.startsWith(`agg:${SITE_CONFIG.id}:`)) {
-                detailUrl = item.id.replace(`agg:${SITE_CONFIG.id}:`, '');
+                const internalUrl = item.id.slice(`agg:${SITE_CONFIG.id}:`.length);
+
+                // If the ID is an episode page URL (not a series page), use it directly as watchUrl
+                const isEpisodePage = /episode/i.test(internalUrl) || !/\/anime\//i.test(internalUrl);
+                if (isEpisodePage) {
+                    watchUrl = internalUrl;
+                } else {
+                    // It's a series page — navigate to the target episode
+                    const detailRes = await axios.get(internalUrl, { headers: DEFAULT_HEADERS, timeout: 10000 });
+                    const $d = cheerio.load(detailRes.data);
+                    const epPageUrl = $d('.eplister li > a').first().attr('href');
+                    if (!epPageUrl) return [];
+
+                    const epRes = await axios.get(epPageUrl, { headers: DEFAULT_HEADERS, timeout: 10000 });
+                    const $ep = cheerio.load(epRes.data);
+                    const targetEpisode = item.episode || 1;
+
+                    $ep('div.episodelist > ul > li').each((_, el) => {
+                        const epLink = $ep(el).find('a');
+                        const rawText = epLink.find('span').text().trim();
+                        const epNumMatch = rawText.match(/(\d+)/);
+                        if (epNumMatch && parseInt(epNumMatch[1]) === targetEpisode) {
+                            watchUrl = epLink.attr('href') || '';
+                            return false;
+                        }
+                    });
+                }
             } else {
+                // Cross-provider: search by title
                 const searchQueries = [item.title, ...(item.aliases || [])];
                 for (const query of searchQueries) {
                     if (!query) continue;
@@ -166,36 +260,31 @@ const animekhorProvider: Provider = {
 
                     if (candidates.length > 0) {
                         candidates.sort((a, b) => b.score - a.score);
-                        detailUrl = candidates[0].url;
+                        const detailUrl = candidates[0].url;
                         console.log(`[Animekhor] Matched search result: "${candidates[0].title}"`);
+
+                        const detailRes = await axios.get(detailUrl, { headers: DEFAULT_HEADERS, timeout: 10000 });
+                        const $d = cheerio.load(detailRes.data);
+                        const epPageUrl = $d('.eplister li > a').first().attr('href');
+                        if (!epPageUrl) break;
+
+                        const epRes = await axios.get(epPageUrl, { headers: DEFAULT_HEADERS, timeout: 10000 });
+                        const $ep = cheerio.load(epRes.data);
+                        const targetEpisode = item.episode || 1;
+
+                        $ep('div.episodelist > ul > li').each((_, el) => {
+                            const epLink = $ep(el).find('a');
+                            const rawText = epLink.find('span').text().trim();
+                            const epNumMatch = rawText.match(/(\d+)/);
+                            if (epNumMatch && parseInt(epNumMatch[1]) === targetEpisode) {
+                                watchUrl = epLink.attr('href') || '';
+                                return false;
+                            }
+                        });
                         break;
                     }
                 }
             }
-
-            if (!detailUrl) return [];
-
-            const detailRes = await axios.get(detailUrl, { headers: DEFAULT_HEADERS, timeout: 10000 });
-            const $d = cheerio.load(detailRes.data);
-
-            let epPageUrl = $d('.eplister li > a').first().attr('href');
-            if (!epPageUrl) return [];
-
-            const epRes = await axios.get(epPageUrl, { headers: DEFAULT_HEADERS, timeout: 10000 });
-            const $ep = cheerio.load(epRes.data);
-
-            let watchUrl = '';
-            const targetEpisode = item.episode || 1;
-
-            $ep('div.episodelist > ul > li').each((_, el) => {
-                const epLink = $ep(el).find('a');
-                const rawText = epLink.find('span').text().trim();
-                const epNumMatch = rawText.match(/(\d+)/);
-                if (epNumMatch && parseInt(epNumMatch[1]) === targetEpisode) {
-                    watchUrl = epLink.attr('href') || '';
-                    return false;
-                }
-            });
 
             if (!watchUrl) return [];
 
@@ -225,7 +314,7 @@ const animekhorProvider: Provider = {
                 }
             });
 
-            // Resolve embeds to real video URLs (parallel, max 2 streams)
+            // Resolve embeds to real video URLs (parallel, max 3 attempts → 2 streams)
             const resolvePromises = embeds.slice(0, 3).map(e =>
                 resolveEmbed(e.url, {
                     siteUrl: SITE_CONFIG.mainUrl,

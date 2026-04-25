@@ -1,7 +1,8 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
-import { Provider, MediaItem, Stream } from '../types';
+import { Provider, MediaItem, Stream, Meta } from '../types';
 import { resolveEmbed } from '../utils/embedResolver';
+import { db } from '../utils/db';
 
 const SITE_CONFIG = {
     id: 'donghuaworld',
@@ -24,6 +25,24 @@ const donghuaworldProvider: Provider = {
     enabled: true,
     weight: 80,
 
+    async resolveMediaItem(id: string, type: string): Promise<MediaItem | null> {
+        const prefix = `agg:${SITE_CONFIG.id}:`;
+        if (!id.startsWith(prefix)) return null;
+        const internalId = id.slice(prefix.length);
+
+        let episodeNum: number | undefined;
+        const epMatch = internalId.match(/episode[- _](\d+)/i);
+        if (epMatch) episodeNum = parseInt(epMatch[1]);
+
+        const meta = this.getMeta ? await this.getMeta(internalId, type).catch(() => null) : null;
+        const rawTitle = meta?.name || '';
+        const aliases: string[] = meta?.aliases ? [...meta.aliases] : [];
+        const title = rawTitle.replace(/\s+episode\s+\d+.*/i, '').replace(/\s+ep\.?\s*\d+.*/i, '').trim();
+        if (rawTitle !== title) aliases.push(rawTitle);
+
+        return { id, type: type as any, title, aliases, season: 1, episode: episodeNum };
+    },
+
     async search(query: string, type: string): Promise<MediaItem[]> {
         const searchUrl = `${SITE_CONFIG.mainUrl}/?s=${encodeURIComponent(query)}`;
         const searchRes = await axios.get(searchUrl, { headers: DEFAULT_HEADERS, timeout: 10000 });
@@ -44,7 +63,7 @@ const donghuaworldProvider: Provider = {
         return results;
     },
 
-    async getCatalog(type: string, extra: any): Promise<import('../types').Meta[]> {
+    async getCatalog(type: string, extra: any): Promise<Meta[]> {
         if (extra?.search) {
             const items = await this.search!(extra.search, type);
             return items.map(i => ({
@@ -55,7 +74,10 @@ const donghuaworldProvider: Provider = {
         }
 
         try {
-            const res = await axios.get(SITE_CONFIG.mainUrl, { headers: DEFAULT_HEADERS, timeout: 10000 });
+            const skip = parseInt(extra?.skip || '0') || 0;
+            const page = Math.floor(skip / 20) + 1;
+            const popularUrl = `${SITE_CONFIG.mainUrl}/anime/?sub=&order=popular&page=${page}`;
+            const res = await axios.get(popularUrl, { headers: DEFAULT_HEADERS, timeout: 10000 });
             const $ = cheerio.load(res.data);
             const metas: any[] = [];
             $('div.listupd > article').each((_, el) => {
@@ -79,7 +101,11 @@ const donghuaworldProvider: Provider = {
         }
     },
 
-    async getMeta(id: string, type: string): Promise<import('../types').Meta | null> {
+    async getMeta(id: string, type: string): Promise<Meta | null> {
+        const cacheKey = `meta:agg:${SITE_CONFIG.id}:${id}`;
+        const cached = db.get(cacheKey) as Meta | null;
+        if (cached) return cached;
+
         try {
             const res = await axios.get(id, { headers: DEFAULT_HEADERS, timeout: 10000 });
             const $ = cheerio.load(res.data);
@@ -89,6 +115,11 @@ const donghuaworldProvider: Provider = {
             const background = $('div.bigcontent').attr('style')?.match(/url\(['"]?([^'"]+)['"]?\)/)?.[1];
             const description = $('div.entry-content').text().trim();
 
+            const alterText = $('span.alter').text().trim();
+            const aliases = alterText
+                ? alterText.split(',').map(s => s.trim()).filter(s => s && s !== title)
+                : [];
+
             const meta: any = {
                 id: `agg:${SITE_CONFIG.id}:${id}`,
                 type: 'series',
@@ -96,6 +127,7 @@ const donghuaworldProvider: Provider = {
                 poster: poster,
                 background: background,
                 description: description,
+                aliases,
                 videos: []
             };
 
@@ -107,21 +139,42 @@ const donghuaworldProvider: Provider = {
                 
                 $ep('div.episodelist > ul > li').each((i, el) => {
                     const epLink = $ep(el).find('a');
-                    const rawText = epLink.find('span').text().trim();
+                    
+                    const playinfoSpan = epLink.find('.playinfo span').text().trim();
+                    const rawText = playinfoSpan || epLink.find('span').text().trim() || epLink.text().trim();
                     const epNumMatch = rawText.match(/(\d+)/);
                     const epNum = epNumMatch ? parseInt(epNumMatch[1]) : i + 1;
                     const href = epLink.attr('href');
                     
+                    let dateText = epLink.find('.epl-date').text().trim();
+                    if (!dateText && playinfoSpan) {
+                        const parts = playinfoSpan.split('-');
+                        if (parts.length > 1) {
+                            dateText = parts[parts.length - 1].trim();
+                        }
+                    }
+                    
+                    let released: string;
+                    try {
+                        const parsedDate = new Date(dateText);
+                        released = (dateText && !isNaN(parsedDate.getTime()))
+                            ? parsedDate.toISOString()
+                            : new Date(epNum * 86400000).toISOString();
+                    } catch (e) {
+                        released = new Date(epNum * 86400000).toISOString();
+                    }
+
                     meta.videos.push({
                         id: `agg:${SITE_CONFIG.id}:${href}`,
                         title: `Episode ${epNum}`,
                         season: 1,
                         episode: epNum,
-                        released: new Date().toISOString(),
+                        released,
                     });
                 });
             }
-            
+
+            db.set(cacheKey, meta, 3600);
             return meta;
         } catch (err) {
             console.error(`[Donghuaworld] getMeta error:`, err);

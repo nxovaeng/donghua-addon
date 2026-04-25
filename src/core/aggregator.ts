@@ -9,18 +9,35 @@ export class Aggregator {
     const cached = this.getFromCache(`streams:${id}`);
     if (cached) return cached;
 
-    const meta = await metadataService.getMeta(id, type);
-    if (!meta) return [];
+    let mediaItem: MediaItem;
 
-    // Clone meta to avoid mutating the cached MediaItem
-    const mediaItem: MediaItem = { ...meta };
+    if (id.startsWith('agg:')) {
+      const afterAgg = id.slice('agg:'.length);
+      const colonIdx = afterAgg.indexOf(':');
+      if (colonIdx === -1) return [];
+      const providerId = afterAgg.slice(0, colonIdx);
 
-    // Parse season/episode only for series
-    if (type !== 'movie') {
-      const idParts = id.split(':');
-      if (idParts.length > 2) {
-        mediaItem.season = parseInt(idParts[1]) || 1;
-        mediaItem.episode = parseInt(idParts[2]) || 1;
+      const providers = providerManager.getEnabledProviders();
+      const provider = providers.find(p => p.id === providerId);
+      if (!provider) return [];
+
+      if (!provider.resolveMediaItem) return [];
+      const resolved = await provider.resolveMediaItem(id, type).catch(() => null);
+      if (!resolved) return [];
+      mediaItem = resolved;
+    } else {
+      // IMDB/BGM IDs — look up via metadataService
+      const meta = await metadataService.getMeta(id, type);
+      if (!meta) return [];
+
+      mediaItem = { ...meta } as MediaItem;
+
+      if (type !== 'movie') {
+        const idParts = id.split(':');
+        if (idParts.length > 2) {
+          mediaItem.season = parseInt(idParts[1]) || 1;
+          mediaItem.episode = parseInt(idParts[2]) || 1;
+        }
       }
     }
 
@@ -84,43 +101,65 @@ export class Aggregator {
 
   public async getCatalog(type: string, id: string, extra: any): Promise<Meta[]> {
     const providers = providerManager.getEnabledProviders();
-    const catalogPromises = providers.map(async (p) => {
-      if (p.getCatalog) {
-        try {
-          return await p.getCatalog(type, extra);
-        } catch (err) {
-          console.error(`[Aggregator] Provider ${p.id} catalog failed:`, err);
-          return [];
+
+    // For search queries, aggregate across all providers
+    if (extra?.search) {
+      const catalogPromises = providers.map(async (p) => {
+        if (p.getCatalog) {
+          try {
+            return await p.getCatalog(type, extra);
+          } catch (err) {
+            console.error(`[Aggregator] Provider ${p.id} catalog failed:`, err);
+            return [];
+          }
         }
+        return [];
+      });
+
+      const results = await Promise.all(catalogPromises);
+      const flattened = results.flat();
+
+      // Deduplicate by name
+      const seen = new Set<string>();
+      return flattened.filter(m => {
+        if (seen.has(m.name)) return false;
+        seen.add(m.name);
+        return true;
+      });
+    }
+
+    // For homepage catalog, use only animekhor (popular page)
+    const animekhor = providers.find(p => p.id === 'animekhor');
+    if (animekhor?.getCatalog) {
+      try {
+        return await animekhor.getCatalog(type, extra);
+      } catch (err) {
+        console.error(`[Aggregator] Animekhor catalog failed:`, err);
+        return [];
       }
-      return [];
-    });
+    }
 
-    const results = await Promise.all(catalogPromises);
-    const flattened = results.flat();
-
-    // Deduplicate by name
-    const seen = new Set<string>();
-    return flattened.filter(m => {
-      if (seen.has(m.name)) return false;
-      seen.add(m.name);
-      return true;
-    });
+    return [];
   }
 
   public async getMeta(type: string, id: string): Promise<Meta | null> {
+    const cached = db.get(`meta:${id}`) as Meta | null;
+    if (cached) return cached;
+
     const providers = providerManager.getEnabledProviders();
-    // Format: agg:<provider_id>:<internal_id>
     if (id.startsWith('agg:')) {
-      const parts = id.split(':');
-      if (parts.length < 3) return null;
-      const providerId = parts[1];
-      const internalId = parts.slice(2).join(':');
+      const afterAgg = id.slice('agg:'.length);
+      const colonIdx = afterAgg.indexOf(':');
+      if (colonIdx === -1) return null;
+      const providerId = afterAgg.slice(0, colonIdx);
+      const internalId = afterAgg.slice(colonIdx + 1);
 
       const provider = providers.find(p => p.id === providerId);
       if (provider && provider.getMeta) {
         try {
-          return await provider.getMeta(internalId, type);
+          const meta = await provider.getMeta(internalId, type);
+          if (meta) db.set(`meta:${id}`, meta, 3600);
+          return meta;
         } catch (err) {
           console.error(`[Aggregator] Provider ${providerId} getMeta failed:`, err);
           return null;

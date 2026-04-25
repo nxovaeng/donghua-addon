@@ -106,7 +106,7 @@ interface ParsedEpisode {
 
 function parseEpNumber(epName: string, fallbackIndex: number = 0): number {
   if (!epName) return fallbackIndex + 1;
-  const m = epName.match(/(\d+)/);
+  const m = epName.match(/(?:Episode|Eps?|第)\s*(\d+)/i) || epName.match(/(\d+)/);
   return m ? parseInt(m[1]) : fallbackIndex + 1;
 }
 
@@ -169,7 +169,7 @@ async function getCatalog(search?: string, skip: number = 0): Promise<Meta[]> {
     }
 
     return finalItems.map(item => ({
-      id: `dhf:${item.vod_id}`,
+      id: `agg:${SITE_CONFIG.id}:${item.vod_id}`,
       type: 'series',
       name: item.vod_name,
       poster: item.vod_pic || undefined,
@@ -190,7 +190,7 @@ async function getMetaById(vodId: string): Promise<Meta | null> {
     if (!item) return null;
 
     const meta: any = {
-      id: `dhf:${item.vod_id}`,
+      id: `agg:${SITE_CONFIG.id}:${item.vod_id}`,
       type: 'series',
       name: item.vod_name,
       poster: item.vod_pic || undefined,
@@ -207,14 +207,18 @@ async function getMetaById(vodId: string): Promise<Meta | null> {
 
     const episodes = parseDailymotionEpisodes(item);
     const baseTs = item.vod_time_add ? item.vod_time_add * 1000 : Date.now();
+    const totalEps = episodes.length;
 
-    meta.videos = episodes.map((ep, idx) => ({
-      id: `dhf:${item.vod_id}:${ep.dmVideoId}`,
-      title: ep.name || ep.dmVideoId,
-      season: 1,
-      episode: ep.episodeNumber,
-      released: new Date(baseTs + idx * 86400000).toISOString(),
-    })).reverse();
+    meta.videos = episodes.map((ep, idx) => {
+      const epDateTs = baseTs - ((totalEps - 1 - idx) * 86400000);
+      return {
+        id: `agg:${SITE_CONFIG.id}:${item.vod_id}:${ep.dmVideoId}`,
+        title: ep.name || ep.dmVideoId,
+        season: 1,
+        episode: ep.episodeNumber,
+        released: new Date(epDateTs).toISOString(),
+      };
+    }).reverse();
 
     return meta;
   } catch (err: unknown) {
@@ -232,6 +236,34 @@ const donghuafunProvider: Provider = {
   enabled: true,
   weight: 100,
 
+  async resolveMediaItem(id: string, type: string): Promise<MediaItem | null> {
+    // id format: agg:donghuafun:<vodId>  or  agg:donghuafun:<vodId>:<dmVideoId>
+    const prefix = `agg:${SITE_CONFIG.id}:`;
+    if (!id.startsWith(prefix)) return null;
+    const internalId = id.slice(prefix.length);
+    const parts = internalId.split(':');
+    const vodId = parts[0];
+    const dmVideoId = parts[1]; // may be undefined for series-level IDs
+
+    const meta = await getMetaById(vodId).catch(() => null);
+    if (!meta) return null;
+
+    let episodeNum: number | undefined;
+    if (dmVideoId && meta.videos) {
+      const video = meta.videos.find(v => v.id === id);
+      episodeNum = video?.episode;
+    }
+
+    return {
+      id,
+      type: type as any,
+      title: meta.name,
+      aliases: meta.aliases || [],
+      season: 1,
+      episode: episodeNum,
+    };
+  },
+
   async search(query: string, type: string): Promise<MediaItem[]> {
     const metas = await getCatalog(query);
     return metas.map(m => ({
@@ -246,6 +278,8 @@ const donghuafunProvider: Provider = {
   },
 
   async getMeta(id: string, type: string): Promise<Meta | null> {
+    // internalId passed from aggregator is already stripped of "agg:donghuafun:"
+    // it may be "<vodId>" or "<vodId>:<dmVideoId>"
     const vodId = id.split(':')[0];
     return await getMetaById(vodId);
   },
@@ -255,6 +289,28 @@ const donghuafunProvider: Provider = {
     console.log(`[${SITE_CONFIG.name}] Requesting streams for: ${item.title}${epLog} (ID: ${item.id})`);
 
     try {
+      // Fast path: if the ID encodes the dmVideoId directly (agg:donghuafun:<vodId>:<dmVideoId>)
+      if (item.id.startsWith(`agg:${SITE_CONFIG.id}:`)) {
+        const parts = item.id.split(':');
+        // parts: ['agg', 'donghuafun', vodId, dmVideoId]
+        if (parts.length >= 4) {
+          const dmVideoId = parts[3];
+          const resolved = await resolveDailymotionHLS(dmVideoId);
+          if (resolved) {
+            return [{
+              url: buildHlsProxyUrl(resolved.url, {
+                referer: 'https://www.dailymotion.com/',
+                origin: 'https://www.dailymotion.com',
+                userAgent: DEFAULT_HEADERS['User-Agent'],
+                maxRes: true,
+              }),
+              name: `[${resolved.quality}] ${SITE_CONFIG.name}`,
+              description: `Dailymotion · via MediaFlow`,
+            }];
+          }
+          return [];
+        }
+      }
       // Step 1: Search by title (with fallback aliases)
       let searchData: MacCmsResponse | null = null;
       const searchQueries = [item.title, ...(item.aliases || [])];
@@ -353,37 +409,5 @@ const donghuafunProvider: Provider = {
     }
   },
 };
-
-// ── Exported aliases for addon.ts ─────────────────────────────────────────────
-
-export { getCatalog as getDonghuafunCatalog };
-export { getMetaById as getDonghuafunMeta };
-
-export async function getDonghuafunStreams(vodId: string, dmVideoId: string): Promise<Stream[]> {
-  try {
-    const resolved = await resolveDailymotionHLS(dmVideoId);
-    if (!resolved) {
-      console.error(`[${SITE_CONFIG.name}] Could not resolve DM stream for ${dmVideoId}`);
-      return [];
-    }
-
-    const streamUrl = buildHlsProxyUrl(resolved.url, {
-      referer: 'https://www.dailymotion.com/',
-      origin: 'https://www.dailymotion.com',
-      userAgent: DEFAULT_HEADERS['User-Agent'],
-      maxRes: true,
-    });
-
-    return [{
-      url: streamUrl,
-      name: `[${resolved.quality}] ${SITE_CONFIG.name}`,
-      description: `Dailymotion · via MediaFlow`,
-    }];
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[${SITE_CONFIG.name}] Stream error: ${message}`);
-    return [];
-  }
-}
 
 export default donghuafunProvider;
