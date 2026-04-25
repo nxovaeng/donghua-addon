@@ -104,10 +104,10 @@ interface ParsedEpisode {
   episodeNumber: number;
 }
 
-function parseEpNumber(epName: string): number {
-  if (!epName) return 0;
+function parseEpNumber(epName: string, fallbackIndex: number = 0): number {
+  if (!epName) return fallbackIndex + 1;
   const m = epName.match(/(\d+)/);
-  return m ? parseInt(m[1]) : 0;
+  return m ? parseInt(m[1]) : fallbackIndex + 1;
 }
 
 function stripHtml(html: string): string {
@@ -133,12 +133,12 @@ function parseDailymotionEpisodes(item: MacCmsItem): ParsedEpisode[] {
   const dmBlock = urlBlocks[dmIndex] || '';
   const episodes = dmBlock.split('#').filter(Boolean);
 
-  return episodes.map(ep => {
+  return episodes.map((ep, idx) => {
     const [epName, dmId] = ep.split('$');
     return {
       name: epName || dmId,
       dmVideoId: dmId,
-      episodeNumber: parseEpNumber(epName),
+      episodeNumber: parseEpNumber(epName, idx),
     };
   });
 }
@@ -280,10 +280,25 @@ const donghuafunProvider: Provider = {
         return [];
       }
 
-      // Step 3: Find the best match and parse episodes
+      // Step 3: Find the best match by title similarity, then parse episodes
+      const validTitles = [item.title, ...(item.aliases || [])].map(t => t.toLowerCase());
+
+      // Score each result: exact match > partial match
+      const scoredItems = detailData.list.map(vodItem => {
+        const nameLower = vodItem.vod_name.toLowerCase();
+        let score = 0;
+        if (validTitles.some(t => t === nameLower)) score += 100;
+        else if (validTitles.some(t => nameLower.includes(t) || t.includes(nameLower))) score += 50;
+        return { vodItem, score };
+      }).filter(x => x.score > 0 || detailData.list.length === 1);
+
+      // If no title match at all, fall back to using all results
+      const candidates = scoredItems.length > 0 ? scoredItems : detailData.list.map(v => ({ vodItem: v, score: 0 }));
+      candidates.sort((a, b) => b.score - a.score);
+
       const streams: Stream[] = [];
 
-      for (const vodItem of detailData.list) {
+      for (const { vodItem } of candidates) {
         const episodes = parseDailymotionEpisodes(vodItem);
         if (episodes.length === 0) continue;
 

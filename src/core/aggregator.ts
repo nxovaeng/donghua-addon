@@ -6,25 +6,28 @@ import { MediaItem, Stream, Meta } from '../types';
 
 export class Aggregator {
   public async getStreams(type: string, id: string): Promise<Stream[]> {
-    const cached = this.getFromCache(id);
+    const cached = this.getFromCache(`streams:${id}`);
     if (cached) return cached;
 
     const meta = await metadataService.getMeta(id, type);
     if (!meta) return [];
 
+    // Clone meta to avoid mutating the cached MediaItem
+    const mediaItem: MediaItem = { ...meta };
+
     // Parse season/episode only for series
     if (type !== 'movie') {
       const idParts = id.split(':');
       if (idParts.length > 2) {
-        meta.season = parseInt(idParts[1]) || 1;
-        meta.episode = parseInt(idParts[2]) || 1;
+        mediaItem.season = parseInt(idParts[1]) || 1;
+        mediaItem.episode = parseInt(idParts[2]) || 1;
       }
     }
 
     const providers = providerManager.getEnabledProviders();
     const streamPromises = providers.map(async (p) => {
       try {
-        const streams = await p.getStreams(meta);
+        const streams = await p.getStreams(mediaItem);
         return streams.map(s => {
           if (s.url && s.headers) {
             return {
@@ -73,7 +76,7 @@ export class Aggregator {
     });
 
     if (sorted.length > 0) {
-      this.saveToCache(id, sorted);
+      this.saveToCache(`streams:${id}`, sorted);
     }
 
     return sorted;
