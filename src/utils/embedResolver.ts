@@ -1,0 +1,128 @@
+/**
+ * Shared embed resolver for donghua sites (donghuaworld, donghuastream, animekhor).
+ *
+ * Classifies iframe embed URLs by domain and resolves them to real
+ * playable video URLs via the appropriate resolver.
+ */
+
+import { resolveDailymotionHLS } from './dailymotion';
+import { resolveDonghuaPlanet } from './donghuaplanet';
+// import { resolveOkRu } from './okru';  // 绑定ip 屏蔽了
+import { buildHlsProxyUrl, buildStreamProxyUrl } from './mediaflow';
+import { Stream } from '../types';
+
+const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+export interface EmbedResolveOptions {
+  /** The originating site URL used as Referer */
+  siteUrl: string;
+  /** Label shown in Stremio (e.g. "Dark Server", "DM Player") */
+  serverLabel: string;
+  /** Provider name for logging */
+  providerName: string;
+}
+
+/**
+ * Resolve an iframe embed URL to a Stremio-compatible Stream object.
+ * Returns null if the embed cannot be resolved.
+ */
+export async function resolveEmbed(
+  embedUrl: string,
+  options: EmbedResolveOptions
+): Promise<Stream | null> {
+  const { siteUrl, serverLabel, providerName } = options;
+
+  try {
+    // ── Dailymotion (standard embed) ─────────────────────────────────────
+    const dmMatch = embedUrl.match(/dailymotion\.com\/embed\/video\/([a-zA-Z0-9]+)/);
+    if (dmMatch) {
+      return resolveDM(dmMatch[1], serverLabel, providerName);
+    }
+
+    // ── Dailymotion (geo player: geo.dailymotion.com/player/xxx?video=YYY) ─
+    const geoMatch = embedUrl.match(/geo\.dailymotion\.com\/player\/[^?]+\?.*video=([a-zA-Z0-9]+)/);
+    if (geoMatch) {
+      return resolveDM(geoMatch[1], serverLabel, providerName);
+    }
+
+    // ── Rumble direct embed (rumble.com/embed/xxx) ───────────────────────
+    if (embedUrl.includes('rumble.com/embed/')) {
+      const resolved = await resolveDonghuaPlanet(embedUrl, siteUrl);
+      if (!resolved) {
+        console.warn(`[${providerName}] Could not resolve Rumble embed: ${embedUrl}`);
+        return null;
+      }
+      return buildStreamResult(resolved, embedUrl, serverLabel, 'Rumble');
+    }
+
+    // ── DonghuaPlanet (Rumble-based JWPlayer) ────────────────────────────
+    if (embedUrl.includes('donghuaplanet.com') || embedUrl.includes('playdaku.com')) {
+      const resolved = await resolveDonghuaPlanet(embedUrl, siteUrl);
+      if (!resolved) {
+        console.warn(`[${providerName}] Could not resolve DonghuaPlanet embed: ${embedUrl}`);
+        return null;
+      }
+      return buildStreamResult(resolved, embedUrl, serverLabel, 'Rumble');
+    }
+
+    // ── Ok.ru — DISABLED (video URLs are IP-bound, won't work across machines)
+    if (embedUrl.includes('ok.ru/')) {
+      return null;
+    }
+
+    // ── Unknown embed — skip ─────────────────────────────────────────────
+    console.warn(`[${providerName}] Unknown embed domain, skipping: ${embedUrl}`);
+    return null;
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[${providerName}] Embed resolve error for ${embedUrl}: ${message}`);
+    return null;
+  }
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+async function resolveDM(videoId: string, serverLabel: string, providerName: string): Promise<Stream | null> {
+  const resolved = await resolveDailymotionHLS(videoId);
+  if (!resolved) {
+    console.warn(`[${providerName}] Could not resolve Dailymotion video: ${videoId}`);
+    return null;
+  }
+  return {
+    url: buildHlsProxyUrl(resolved.url, {
+      referer: 'https://www.dailymotion.com/',
+      origin: 'https://www.dailymotion.com',
+      userAgent: DEFAULT_USER_AGENT,
+      maxRes: true,
+    }),
+    name: `[${resolved.quality}] ${serverLabel}`,
+    description: `Dailymotion · via MediaFlow`,
+  };
+}
+
+function buildStreamResult(
+  resolved: { url: string; quality: string },
+  embedUrl: string,
+  serverLabel: string,
+  source: string,
+): Stream {
+  const isHls = resolved.url.includes('.m3u8');
+  const proxyUrl = isHls
+    ? buildHlsProxyUrl(resolved.url, {
+      referer: embedUrl,
+      origin: new URL(embedUrl).origin,
+      userAgent: DEFAULT_USER_AGENT,
+    })
+    : buildStreamProxyUrl(resolved.url, {
+      referer: embedUrl,
+      origin: new URL(embedUrl).origin,
+      userAgent: DEFAULT_USER_AGENT,
+    });
+
+  return {
+    url: proxyUrl,
+    name: `[${resolved.quality}] ${serverLabel}`,
+    description: `${source} · via MediaFlow`,
+  };
+}
+
