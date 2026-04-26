@@ -1,11 +1,34 @@
+version: '3.8'
+
 services:
-  addon:
+  donghua-addon:
+    # --- 构建配置 ---
+    # 如果你在 Dpanel 或 Portainer 部署，直接指定 git 地址即可自动拉取和构建镜像：
+    # build: https://github.com/你的用户名/你的仓库名.git#main
+    # 如果你是本地或者直接部署在有源码的目录中，使用 "."
     build: .
+    
     container_name: donghua-addon
-    restart: always
+    restart: unless-stopped
     ports:
-      - "${PORT:-3000}:3000"
-    env_file:
-      - .env
+      - "3000:3000"
+      
+    # --- 环境变量声明 ---
     environment:
-      - NODE_ENV=production
+      # 服务监听的端口 (需要和 ports 的内部端口对应)
+      - PORT=3000
+      
+      # MediaFlow Proxy 的地址 (非常重要，结合之前的 Extractor 功能)
+      - MEDIAFLOW_PROXY_URL=http://<填写你的代理地址>:8888
+      # 代理服务的 API 密码（如果没有可以留空或注释掉）
+      - MEDIAFLOW_API_PASSWORD=
+      
+      # 可选：TMDB的 API KEY，用于获取更多的番剧元数据
+      - TMDB_API_KEY=
+      
+      # 动漫资源的 API 地址 (保持默认即可)
+      - BANGUMI_API_URL=https://api.bgm.tv
+      - MACCMS_BASE=https://donghuafun.com/api.php/provide/vod/at/json
+      
+      # 日志级别 (可选: debug, info, warn, error)
+      - LOG_LEVEL=info

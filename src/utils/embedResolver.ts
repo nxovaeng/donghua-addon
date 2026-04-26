@@ -8,8 +8,27 @@
 import { resolveDailymotionHLS } from './dailymotion';
 import { resolveDonghuaPlanet } from './donghuaplanet';
 // import { resolveOkRu } from './okru';  // 绑定ip 屏蔽了
-import { buildHlsProxyUrl, buildStreamProxyUrl } from './mediaflow';
+import { buildHlsProxyUrl, buildStreamProxyUrl, resolveViaMediaflowExtractor } from './mediaflow';
 import { Stream } from '../types';
+import { config } from '../config';
+
+const EXTRACTOR_MAP: Record<string, string> = {
+  'dood': 'doodstream', // Handles dood.watch, doodstream.com, etc
+  'filelions': 'filelions',
+  'mixdrop': 'mixdrop',
+  'streamtape': 'streamtape',
+  'vidoza': 'vidoza',
+  'streamwish': 'streamwish',
+  'lulustream': 'lulustream',
+  'turbovidplay': 'turbovidplay',
+  'maxstream': 'maxstream',
+  'uqload': 'uqload',
+  'ok.ru': 'okru', // IMPORTANT: Maps ok.ru to the 'okru' extractor
+  'voe': 'voe',
+  'vidmoly': 'vidmoly',
+  'supervideo': 'supervideo',
+  'mp4upload': 'mp4upload'
+};
 
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
@@ -65,9 +84,19 @@ export async function resolveEmbed(
       return buildStreamResult(resolved, embedUrl, serverLabel, 'Rumble');
     }
 
-    // ── Ok.ru — DISABLED (video URLs are IP-bound, won't work across machines)
-    if (embedUrl.includes('ok.ru/')) {
-      return null;
+    // ── MediaFlow Extractor integration ────────────────────────────────────
+    let hostname = '';
+    try {
+      hostname = new URL(embedUrl).hostname;
+    } catch (e) { }
+
+    const matchedKey = Object.keys(EXTRACTOR_MAP).find(key => hostname.includes(key));
+    if (matchedKey) {
+      const extractorName = EXTRACTOR_MAP[matchedKey];
+      const extracted = await resolveViaMediaflowExtractor(extractorName, embedUrl);
+      if (extracted) {
+        return buildExtractorStreamResult(extracted, embedUrl, serverLabel, matchedKey);
+      }
     }
 
     // ── Unknown embed — skip ─────────────────────────────────────────────
@@ -126,3 +155,26 @@ function buildStreamResult(
   };
 }
 
+function buildExtractorStreamResult(
+  extracted: { url: string; headers?: Record<string, string>; is_hls?: boolean },
+  embedUrl: string,
+  serverLabel: string,
+  source: string,
+): Stream {
+  const isHls = extracted.is_hls ?? extracted.url.includes('.m3u8');
+
+  // Extract custom headers
+  const referer = extracted.headers?.['Referer'] || extracted.headers?.['referer'] || embedUrl;
+  const userAgent = extracted.headers?.['User-Agent'] || extracted.headers?.['user-agent'] || DEFAULT_USER_AGENT;
+  const origin = extracted.headers?.['Origin'] || extracted.headers?.['origin'] || new URL(embedUrl).origin;
+
+  const proxyUrl = isHls
+    ? buildHlsProxyUrl(extracted.url, { referer, origin, userAgent })
+    : buildStreamProxyUrl(extracted.url, { referer, origin, userAgent });
+
+  return {
+    url: proxyUrl,
+    name: `[Auto] ${serverLabel}`,
+    description: `${source.charAt(0).toUpperCase() + source.slice(1)} · via MediaFlow Extractor`,
+  };
+}
