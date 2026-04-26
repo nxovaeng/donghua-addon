@@ -128,13 +128,13 @@ export class Aggregator {
       });
     }
 
-    // For homepage catalog, use only animekhor (popular page)
-    const animekhor = providers.find(p => p.id === 'animekhor');
-    if (animekhor?.getCatalog) {
+    // For homepage catalog, use only donghuaworld (popular page)
+    const donghuaworld = providers.find(p => p.id === 'donghuaworld');
+    if (donghuaworld?.getCatalog) {
       try {
-        return await animekhor.getCatalog(type, extra);
+        return await donghuaworld.getCatalog(type, extra);
       } catch (err) {
-        console.error(`[Aggregator] Animekhor catalog failed:`, err);
+        console.error(`[Aggregator] DonghuaWorld catalog failed:`, err);
         return [];
       }
     }

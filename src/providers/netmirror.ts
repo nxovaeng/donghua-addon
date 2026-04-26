@@ -1,14 +1,13 @@
 import axios from 'axios';
-import * as cheerio from 'cheerio';
 import { Provider, MediaItem, Stream, Meta } from '../types';
 import { db } from '../utils/db';
-import { buildHlsProxyUrl } from '../utils/mediaflow';
+import { buildHlsProxyUrl, buildStreamProxyUrl } from '../utils/mediaflow';
 
 const SITE_CONFIG = {
     id: 'netmirror',
     name: 'NetMirror',
-    mainUrl: 'https://net22.cc',
-    playerUrl: 'https://net52.cc',
+    // Based on the latest NivinCNC source: https://github.com/NivinCNC/CNCVerse-Cloud-Stream-Extension
+    mainUrl: 'https://net52.cc',
 };
 
 const DEFAULT_HEADERS = {
@@ -17,40 +16,44 @@ const DEFAULT_HEADERS = {
     'Referer': SITE_CONFIG.mainUrl + '/'
 };
 
-interface NetMirrorBypass {
-    t_hash_t: string;
-}
-
 /**
- * Perform the "Bypass" logic to get a valid t_hash_t cookie.
+ * Perform the "Bypass" logic to get a valid t_hash cookie.
+ * The server returns Set-Cookie: t_hash=... (not t_hash_t as in older sources).
+ * Max-Age from server is ~100 days, we cache for 24h to be safe.
  */
 async function getBypassCookie(): Promise<string | null> {
     const cacheKey = 'netmirror:bypass';
     const cached = db.get(cacheKey) as string;
-    if (cached) return cached;
+    if (cached) {
+        console.log(`[NetMirror] Using cached bypass cookie`);
+        return cached;
+    }
 
     try {
-        let cookie = '';
-        // The original extension polls p.php multiple times until r: "n"
-        for (let i = 0; i < 5; i++) {
-            const res = await axios.post(`${SITE_CONFIG.mainUrl}/tv/p.php`, {}, {
-                headers: DEFAULT_HEADERS,
-                timeout: 5000
-            });
-            
-            // Extract t_hash_t from Set-Cookie header
-            const setCookie = res.headers['set-cookie'];
-            if (setCookie) {
-                const match = setCookie.join(';').match(/t_hash_t=([^;]+)/);
-                if (match) cookie = match[1];
-            }
+        const res = await axios.post(`${SITE_CONFIG.mainUrl}/p.php`, {}, {
+            headers: DEFAULT_HEADERS,
+            timeout: 10000,
+            validateStatus: () => true
+        });
 
-            if (res.data && res.data.r === 'n' && cookie) {
-                db.set(cacheKey, cookie, 300); // Valid for 5 minutes
-                return cookie;
-            }
-            await new Promise(r => setTimeout(r, 500));
+        console.log(`[NetMirror] p.php status: ${res.status}, body: ${JSON.stringify(res.data)}`);
+
+        let cookie = '';
+        const setCookie = res.headers['set-cookie'];
+        if (setCookie) {
+            // Server returns t_hash (NOT t_hash_t)
+            const match = setCookie.join(';').match(/t_hash=([^;]+)/);
+            if (match) cookie = match[1];
+            console.log(`[NetMirror] Set-Cookie headers: ${setCookie.join(' | ')}`);
         }
+
+        if (res.data && JSON.stringify(res.data).includes('"r":"n"') && cookie) {
+            console.log(`[NetMirror] Bypass successful! t_hash obtained: ${cookie.substring(0, 16)}...`);
+            db.set(cacheKey, cookie, 86400); // 24 hours
+            return cookie;
+        }
+
+        console.warn(`[NetMirror] Bypass incomplete - r:"n"=${JSON.stringify(res.data).includes('"r":"n"')}, cookie=${!!cookie}`);
         return cookie || null;
     } catch (e) {
         console.error('[NetMirror] Bypass error:', e instanceof Error ? e.message : e);
@@ -61,7 +64,7 @@ async function getBypassCookie(): Promise<string | null> {
 const netmirrorProvider: Provider = {
     id: SITE_CONFIG.id,
     name: SITE_CONFIG.name,
-    enabled: true,
+    enabled: false,
     weight: 90,
 
     async search(query: string, _type: string): Promise<MediaItem[]> {
@@ -71,18 +74,17 @@ const netmirrorProvider: Provider = {
             const res = await axios.get(`${SITE_CONFIG.mainUrl}/search.php?s=${encodeURIComponent(query)}&t=${ts}`, {
                 headers: {
                     ...DEFAULT_HEADERS,
-                    'Cookie': bypass ? `t_hash_t=${bypass}; hd=on` : 'hd=on'
+                    'Cookie': bypass ? `t_hash=${bypass}; hd=on; ott=nf` : 'hd=on; ott=nf'
                 },
                 timeout: 10000
             });
 
-            if (!res.data || !Array.isArray(res.data)) return [];
+            if (!res.data || !res.data.searchResult) return [];
 
-            return res.data.map((item: any) => ({
+            return res.data.searchResult.map((item: any) => ({
                 id: `agg:${SITE_CONFIG.id}:${item.id}`,
                 type: item.type === 'series' ? 'series' : 'movie',
-                title: item.title,
-                year: parseInt(item.year) || undefined,
+                title: item.t,
             }));
         } catch (err) {
             console.error('[NetMirror] Search error:', err);
@@ -98,42 +100,40 @@ const netmirrorProvider: Provider = {
         try {
             const bypass = await getBypassCookie();
             const ts = Date.now();
-            // Fetch series episodes if it's a series
-            if (type === 'series') {
-                const res = await axios.get(`${SITE_CONFIG.mainUrl}/episodes.php?s=${id}&t=${ts}`, {
-                    headers: {
-                        ...DEFAULT_HEADERS,
-                        'Cookie': bypass ? `t_hash_t=${bypass}; hd=on` : 'hd=on'
-                    },
-                    timeout: 10000
-                });
 
-                const meta: Meta = {
-                    id: `agg:${SITE_CONFIG.id}:${id}`,
-                    type: 'series',
-                    name: 'Series', // Will be updated by aggregator from Cinemeta
-                    videos: []
-                };
+            // post.php returns full detail including episodes
+            const res = await axios.get(`${SITE_CONFIG.mainUrl}/post.php?id=${id}&t=${ts}`, {
+                headers: {
+                    ...DEFAULT_HEADERS,
+                    'Cookie': bypass ? `t_hash=${bypass}; hd=on; ott=nf` : 'hd=on; ott=nf'
+                },
+                timeout: 10000
+            });
 
-                if (Array.isArray(res.data)) {
-                    meta.videos = res.data.map((ep: any) => ({
-                        id: `agg:${SITE_CONFIG.id}:${id}:${ep.id}`,
-                        title: ep.title || `Episode ${ep.episode}`,
-                        season: parseInt(ep.season) || 1,
-                        episode: parseInt(ep.episode) || 1,
-                        released: new Date().toISOString()
-                    }));
-                }
-                db.set(cacheKey, meta, 3600);
-                return meta;
-            } else {
-                // For movies, we don't have separate episode IDs
-                return {
-                    id: `agg:${SITE_CONFIG.id}:${id}`,
-                    type: 'movie',
-                    name: 'Movie'
-                };
+            const data = res.data;
+            if (!data) return null;
+
+            const meta: Meta = {
+                id: `agg:${SITE_CONFIG.id}:${id}`,
+                type: type,
+                name: data.title,
+                description: data.desc,
+                poster: `https://imgcdn.kim/poster/v/${id}.jpg`,
+                videos: []
+            };
+
+            if (Array.isArray(data.episodes)) {
+                meta.videos = data.episodes.filter((ep: any) => ep !== null).map((ep: any) => ({
+                    id: `agg:${SITE_CONFIG.id}:${id}:${ep.id}`,
+                    title: ep.t || `Episode ${ep.ep}`,
+                    season: parseInt(ep.s.replace('S', '')) || 1,
+                    episode: parseInt(ep.ep.replace('E', '')) || 1,
+                    released: new Date().toISOString()
+                }));
             }
+
+            db.set(cacheKey, meta, 3600);
+            return meta;
         } catch (err) {
             console.error('[NetMirror] getMeta error:', err);
             return null;
@@ -142,25 +142,24 @@ const netmirrorProvider: Provider = {
 
     async getStreams(item: MediaItem): Promise<Stream[]> {
         console.log(`[NetMirror] Resolving streams for: ${item.title}`);
-        
+
         try {
             const bypass = await getBypassCookie();
             let netId = '';
+            let netTitle = item.title;
 
             // 1. Identify the NetMirror ID
             if (item.id.startsWith(`agg:${SITE_CONFIG.id}:`)) {
                 const parts = item.id.split(':');
-                // Format: agg:netmirror:seriesId:episodeId OR agg:netmirror:movieId
+                // agg:netmirror:seriesId:episodeId OR agg:netmirror:movieId
                 netId = parts[parts.length - 1];
             } else {
-                // Search by title if it's from Cinemeta
                 const results = await this.search!(item.title, item.type);
                 if (results.length === 0) return [];
-                // Simple matching
                 const matched = results.find(r => r.title.toLowerCase().includes(item.title.toLowerCase())) || results[0];
                 netId = matched.id.split(':').pop() || '';
-                
-                // If it's a series, we need to fetch the meta to find the correct episode ID
+                netTitle = matched.title;
+
                 if (item.type === 'series' && item.episode) {
                     const meta = await this.getMeta!(netId, 'series');
                     const ep = meta?.videos?.find(v => v.episode === item.episode);
@@ -172,55 +171,37 @@ const netmirrorProvider: Provider = {
 
             if (!netId) return [];
 
-            const commonHeaders = {
-                ...DEFAULT_HEADERS,
-                'Cookie': bypass ? `t_hash_t=${bypass}; hd=on; ott=nf` : 'hd=on; ott=nf'
-            };
-
-            // 2. Step 1: POST to play.php to get 'h'
-            const playPostRes = await axios.post(`${SITE_CONFIG.mainUrl}/play.php`, `id=${netId}`, {
-                headers: {
-                    ...commonHeaders,
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                }
-            });
-            const h = playPostRes.data?.h;
-            if (!h) throw new Error('Failed to get "h" token');
-
-            // 3. Step 2: GET from playerUrl to get data-h (token)
-            const playerRes = await axios.get(`${SITE_CONFIG.playerUrl}/play.php?id=${netId}&${h}`, {
-                headers: {
-                    ...commonHeaders,
-                    'Referer': SITE_CONFIG.mainUrl + '/'
-                }
-            });
-            const $ = cheerio.load(playerRes.data);
-            const token = $('body').attr('data-h');
-            if (!token) throw new Error('Failed to get "data-h" token');
-
-            // 4. Step 3: GET playlist.php
+            // 2. Use the new mobile/playlist.php endpoint from latest source
             const ts = Date.now();
-            const playlistRes = await axios.get(`${SITE_CONFIG.playerUrl}/playlist.php?id=${netId}&h=${token}&tm=${ts}`, {
+            const playlistRes = await axios.get(`${SITE_CONFIG.mainUrl}/mobile/playlist.php?id=${netId}&t=${encodeURIComponent(netTitle)}&tm=${ts}`, {
                 headers: {
-                    ...commonHeaders,
-                    'Referer': `${SITE_CONFIG.playerUrl}/play.php?id=${netId}&${h}`
-                }
+                    ...DEFAULT_HEADERS,
+                    'Cookie': bypass ? `t_hash=${bypass}; hd=on; ott=nf` : 'hd=on; ott=nf',
+                    'Referer': `${SITE_CONFIG.mainUrl}/`
+                },
+                timeout: 10000
             });
 
             if (!playlistRes.data || !Array.isArray(playlistRes.data)) return [];
 
-            // 5. Convert to Streams
-            return playlistRes.data.map((track: any) => {
-                const rawUrl = track.file.startsWith('http') ? track.file : `${SITE_CONFIG.playerUrl}${track.file}`;
-                return {
-                    url: buildHlsProxyUrl(rawUrl, {
-                        referer: SITE_CONFIG.playerUrl + '/',
-                        userAgent: DEFAULT_HEADERS['User-Agent']
-                    }),
-                    name: `[${track.label || 'Auto'}] NetMirror`,
-                    description: `${item.title} · OTT Mirror`,
-                };
-            });
+            const streams: Stream[] = [];
+            for (const item of playlistRes.data) {
+                if (Array.isArray(item.sources)) {
+                    for (const source of item.sources) {
+                        const rawUrl = source.file.startsWith('http') ? source.file : `${SITE_CONFIG.mainUrl}${source.file}`;
+                        streams.push({
+                            url: buildHlsProxyUrl(rawUrl, {
+                                referer: SITE_CONFIG.mainUrl + '/',
+                                userAgent: 'Mozilla/5.0 (Android) ExoPlayer',
+                                cookie: bypass ? `t_hash=${bypass}; hd=on; ott=nf` : 'hd=on; ott=nf'
+                            }),
+                            name: `[${source.label || 'Auto'}] NetMirror`,
+                            description: `OTT Mirror · ${source.type || 'HLS'}`,
+                        });
+                    }
+                }
+            }
+            return streams;
 
         } catch (err: unknown) {
             const message = err instanceof Error ? err.message : String(err);

@@ -13,6 +13,7 @@ export interface MediaFlowOptions {
   referer?: string;
   origin?: string;
   userAgent?: string;
+  cookie?: string;
   maxRes?: boolean;
 }
 
@@ -31,6 +32,7 @@ export function buildHlsProxyUrl(hlsManifestUrl: string, options: MediaFlowOptio
   if (options.referer) params.set('h_referer', options.referer);
   if (options.origin) params.set('h_origin', options.origin);
   if (options.userAgent) params.set('h_user-agent', options.userAgent);
+  if (options.cookie) params.set('h_cookie', options.cookie);
   if (options.maxRes) params.set('max_res', 'true');
   if (config.MEDIAFLOW_API_PASSWORD) params.set('api_password', config.MEDIAFLOW_API_PASSWORD);
 
@@ -53,6 +55,7 @@ export function buildStreamProxyUrl(targetUrl: string, options: MediaFlowOptions
   if (options.referer) params.set('h_referer', options.referer);
   if (options.origin) params.set('h_origin', options.origin);
   if (options.userAgent) params.set('h_user-agent', options.userAgent);
+  if (options.cookie) params.set('h_cookie', options.cookie);
   if (options.maxRes) params.set('max_res', 'true');
   if (config.MEDIAFLOW_API_PASSWORD) params.set('api_password', config.MEDIAFLOW_API_PASSWORD);
 
