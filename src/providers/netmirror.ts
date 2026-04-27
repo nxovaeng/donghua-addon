@@ -6,7 +6,6 @@ import { buildHlsProxyUrl, buildStreamProxyUrl } from '../utils/mediaflow';
 const SITE_CONFIG = {
     id: 'netmirror',
     name: 'NetMirror',
-    // Based on the latest NivinCNC source: https://github.com/NivinCNC/CNCVerse-Cloud-Stream-Extension
     mainUrl: 'https://net52.cc',
 };
 

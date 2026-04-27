@@ -89,7 +89,21 @@ export interface Manifest {
       name: string;
       isRequired?: boolean;
       options?: string[];
+      optionsLimit?: number;
     }>;
+  }>;
+  behaviorHints?: {
+    configurable?: boolean;
+    configurationRequired?: boolean;
+    [key: string]: any;
+  };
+  config?: Array<{
+    key: string;
+    type: 'text' | 'number' | 'password' | 'checkbox' | 'select';
+    title?: string;
+    default?: string;
+    options?: string[];
+    required?: boolean;
   }>;
 }
 
@@ -110,4 +124,24 @@ export interface Provider {
    * getStreams to all providers.
    */
   resolveMediaItem?(id: string, type: string): Promise<MediaItem | null>;
+}
+
+/**
+ * 聚合器配置 - 用于定义不同的聚合策略和供应商组合
+ */
+export interface AggregatorConfig {
+  name: string;                    // 聚合器名称，如 'overseas-anime', 'mainland-anime'
+  displayName: string;             // 展示名称，如 '海外动漫'
+  supportedTypes: Array<'movie' | 'series'>; // 支持的内容类型
+  providerIds: string[];           // 该聚合器使用的供应商 ID 列表
+  region?: 'mainland' | 'overseas' | 'auto'; // 地域标签
+  priority?: number;               // 优先级（用于多聚合器场景）
+}
+
+/**
+ * 聚合器注册表条目
+ */
+export interface AggregatorRegistryEntry {
+  config: AggregatorConfig;
+  instance: any; // Aggregator 实例，避免循环依赖
 }

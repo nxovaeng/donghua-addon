@@ -1,8 +1,7 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { Provider, MediaItem, Stream, Meta } from '../types';
-import { resolveDailymotionHLS } from '../utils/dailymotion';
-import { buildHlsProxyUrl } from '../utils/mediaflow';
+import { resolveDM } from '../utils/embedResolver';
 
 const SITE_CONFIG = {
   id: 'donghuafun',
@@ -295,18 +294,9 @@ const donghuafunProvider: Provider = {
         // parts: ['agg', 'donghuafun', vodId, dmVideoId]
         if (parts.length >= 4) {
           const dmVideoId = parts[3];
-          const resolved = await resolveDailymotionHLS(dmVideoId);
+          const resolved = await resolveDM(dmVideoId, SITE_CONFIG.name);
           if (resolved) {
-            return [{
-              url: buildHlsProxyUrl(resolved.url, {
-                referer: 'https://www.dailymotion.com/',
-                origin: 'https://www.dailymotion.com',
-                userAgent: DEFAULT_HEADERS['User-Agent'],
-                maxRes: true,
-              }),
-              name: `[${resolved.quality}] ${SITE_CONFIG.name}`,
-              description: `Dailymotion · via MediaFlow`,
-            }];
+            return [];
           }
           return [];
         }
@@ -360,44 +350,16 @@ const donghuafunProvider: Provider = {
 
         const targetEp = item.episode || 1;
         const matchedEp = episodes.find(ep => ep.episodeNumber === targetEp);
-        if (!matchedEp) {
-          // If no exact episode match and it's a movie/no episode specified, use first
-          if (!item.episode && episodes.length > 0) {
-            const firstEp = episodes[0];
-            const resolved = await resolveDailymotionHLS(firstEp.dmVideoId);
-            if (resolved) {
-              streams.push({
-                url: buildHlsProxyUrl(resolved.url, {
-                  referer: 'https://www.dailymotion.com/',
-                  origin: 'https://www.dailymotion.com',
-                  userAgent: DEFAULT_HEADERS['User-Agent'],
-                  maxRes: true,
-                }),
-                name: `[${resolved.quality}] ${SITE_CONFIG.name}`,
-                description: `Dailymotion · via MediaFlow`,
-              });
-            } else {
-              console.log(`[${SITE_CONFIG.name}] Could not resolve DM stream for ${firstEp.dmVideoId}`);
-            }
+        if (matchedEp) {
+          // Resolve Dailymotion HLS
+          const resolved = await resolveDM(matchedEp.dmVideoId, SITE_CONFIG.name);
+          if (resolved) {
+            streams.push(resolved);
+          } else {
+            console.log(`[${SITE_CONFIG.name}] Could not resolve DM stream for ${matchedEp.dmVideoId}`);
           }
-          continue;
-        }
-
-        // Step 4: Resolve Dailymotion HLS
-        const resolved = await resolveDailymotionHLS(matchedEp.dmVideoId);
-        if (resolved) {
-          streams.push({
-            url: buildHlsProxyUrl(resolved.url, {
-              referer: 'https://www.dailymotion.com/',
-              origin: 'https://www.dailymotion.com',
-              userAgent: DEFAULT_HEADERS['User-Agent'],
-              maxRes: true,
-            }),
-            name: `[${resolved.quality}] ${SITE_CONFIG.name}`,
-            description: `Dailymotion · via MediaFlow`,
-          });
         } else {
-          console.log(`[${SITE_CONFIG.name}] Could not resolve DM stream for ${matchedEp.dmVideoId}`);
+          console.log(`[${SITE_CONFIG.name}] No matching episode found for S${item.season || 1}E${targetEp} in ${vodItem.vod_name}`);
         }
       }
 

@@ -10,9 +10,23 @@ const configSchema = z.object({
   MEDIAFLOW_PROXY_URL: z.string().optional(),
   MEDIAFLOW_API_PASSWORD: z.string().optional(),
   FEBBOX_TOKEN: z.string().optional(),
+  ACCESS_TOKENS: z.string().optional(),
+  ACTIVE_AGGREGATORS: z.string().optional(),
+  ENABLE_ADDON: z.preprocess((val) => {
+    if (typeof val === 'string') return val.toLowerCase() === 'true';
+    return Boolean(val);
+  }, z.boolean()).default(true),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 });
 
 export const config = configSchema.parse(process.env);
+
+export const allowedAccessTokens = config.ACCESS_TOKENS
+  ? config.ACCESS_TOKENS.split(',').map((token) => token.trim()).filter(Boolean)
+  : [];
+
+export const activeAggregators = config.ACTIVE_AGGREGATORS
+  ? config.ACTIVE_AGGREGATORS.split(',').map((item) => item.trim()).filter(Boolean)
+  : [];
 
 export type Config = z.infer<typeof configSchema>;

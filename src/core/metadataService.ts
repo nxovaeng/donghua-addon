@@ -36,7 +36,7 @@ export class MetadataService {
       const item = results[0];
       const title = item.title || item.name;
       const originalTitle = item.original_title || item.original_name;
-      
+
       const aliases = new Set<string>();
       if (title) aliases.add(title);
       if (originalTitle) aliases.add(originalTitle);
@@ -95,6 +95,18 @@ export class MetadataService {
   private saveToCache(id: string, data: MediaItem) {
     const ttl = data.type === 'movie' ? 24 * 3600 : 6 * 3600;
     db.set(id, data, ttl);
+  }
+
+  public async getTMDBId(imdbId: string, type: string): Promise<string | null> {
+    try {
+      const findRes = await this.tmdb.get(`/find/${imdbId}`, { params: { external_source: 'imdb_id' } });
+      const results = type === 'movie' ? findRes.data.movie_results : findRes.data.tv_results;
+      if (!results || results.length === 0) return null;
+      return results[0].id.toString();
+    } catch (err) {
+      console.error(`[MetadataService] TMDB ID lookup failed for ${imdbId}:`, err);
+      return null;
+    }
   }
 }
 

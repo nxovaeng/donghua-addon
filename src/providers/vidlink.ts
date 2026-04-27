@@ -3,7 +3,8 @@ import * as cheerio from 'cheerio';
 import { Provider, MediaItem, Stream, Meta } from '../types';
 import { config } from '../config';
 import { db } from '../utils/db';
-import { resolveEmbed } from '../utils/embedResolver';
+import { buildHlsProxyUrl, buildStreamProxyUrl } from '../utils/mediaflow';
+import { metadataService } from '../core/metadataService';
 
 const SITE_CONFIG = {
   id: 'vidlink',
@@ -18,6 +19,8 @@ const DEFAULT_HEADERS = {
   Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
   'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
 };
+
+const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 const tmdb = axios.create({
   baseURL: 'https://api.themoviedb.org/3',
@@ -207,14 +210,31 @@ const vidlinkProvider: Provider = {
 
   async resolveMediaItem(id: string, type: string): Promise<MediaItem | null> {
     const prefix = `agg:${SITE_CONFIG.id}:`;
-    if (!id.startsWith(prefix)) return null;
-    const tmdbId = id.slice(prefix.length);
+    let tmdbId: string;
+
+    if (id.startsWith(prefix)) {
+      tmdbId = id.slice(prefix.length);
+    } else if (id.startsWith('tt') && /^\d+$/.test(id.slice(2))) {
+      // Handle IMDB ID (ttxxxx format)
+      const tmdbId = await metadataService.getTMDBId(id, type);
+      if (!tmdbId) return null;
+      return {
+        id: `${prefix}${tmdbId}`,
+        type: type as any,
+        title: '', // Will be filled by getMeta
+        aliases: [],
+        year: undefined,
+      };
+    } else {
+      return null;
+    }
+
     const getMetaFn = this.getMeta;
     if (!getMetaFn) return null;
     const meta = await getMetaFn.call(this, tmdbId, type);
     if (!meta) return null;
     return {
-      id,
+      id: id.startsWith(prefix) ? id : `${prefix}${tmdbId}`,
       type: type as any,
       title: meta.name,
       aliases: meta.aliases,
@@ -228,48 +248,60 @@ const vidlinkProvider: Provider = {
       : undefined;
 
     if (!movieId) {
-      if (!item.title) return [];
-      const getCatalogFn = this.getCatalog;
-      if (!getCatalogFn) return [];
-      const candidates = await getCatalogFn.call(this, 'movie', { search: item.title });
-      if (candidates.length === 0) return [];
-      const candidate = candidates[0];
-      if (!candidate.id.startsWith(`agg:${SITE_CONFIG.id}:`)) return [];
-      movieId = candidate.id.slice(`agg:${SITE_CONFIG.id}:`.length);
-    }
-
-    const moviePage = `${SITE_CONFIG.baseUrl}/movie/${movieId}`;
-    try {
-      const res = await axios.get(moviePage, { headers: DEFAULT_HEADERS, timeout: 15000, validateStatus: () => true });
-      const streams: Stream[] = [];
-      if (res.status === 200) {
-        const $ = cheerio.load(res.data);
-        const embedUrls = new Set<string>();
-        $('iframe').each((_, el) => {
-          const src = $(el).attr('src');
-          if (src) embedUrls.add(src.startsWith('//') ? `https:${src}` : src);
-        });
-
-        for (const url of Array.from(embedUrls).slice(0, 3)) {
-          const resolved = await resolveEmbed(url, {
-            siteUrl: SITE_CONFIG.baseUrl,
-            serverLabel: SITE_CONFIG.name,
-            providerName: SITE_CONFIG.name,
-          });
-          if (resolved) streams.push(resolved);
+      if (item.id.startsWith('tt') && /^\d+$/.test(item.id.slice(2))) {
+        // Handle IMDB ID (ttxxxx format)
+        const tmdbId = await metadataService.getTMDBId(item.id, item.type);
+        if (tmdbId) {
+          movieId = tmdbId;
         }
       }
 
-      if (streams.length > 0) return streams;
+      if (!movieId) {
+        if (!item.title) return [];
+        const getCatalogFn = this.getCatalog;
+        if (!getCatalogFn) return [];
+        const candidates = await getCatalogFn.call(this, 'movie', { search: item.title });
+        if (candidates.length === 0) return [];
+        const candidate = candidates[0];
+        if (!candidate.id.startsWith(`agg:${SITE_CONFIG.id}:`)) return [];
+        movieId = candidate.id.slice(`agg:${SITE_CONFIG.id}:`.length);
+      }
+    }
 
-      const resolved = await resolveEmbed(moviePage, {
-        siteUrl: SITE_CONFIG.baseUrl,
-        serverLabel: SITE_CONFIG.name,
-        providerName: SITE_CONFIG.name,
+    // Resolve VidLink API directly: https://vidlink.pro/movie/{tmdbId}.m3u8
+    try {
+      const apiUrl = item.type === 'movie'
+        ? `${SITE_CONFIG.baseUrl}/movie/${movieId}`
+        : `${SITE_CONFIG.baseUrl}/tv/${movieId}${item.season ? `?season=${item.season}&episode=${item.episode || 1}` : ''}`;
+
+      const streamUrl = `${apiUrl}.m3u8`;
+      const cacheKey = `resolved:vidlink:${streamUrl}`;
+
+      const cached = db.get(cacheKey) as Stream | null;
+      if (cached) {
+        console.log(`[VidLink] Returning cached VidLink stream`);
+        return [cached];
+      }
+
+      // Wrap the VidLink stream URL through proxy for proper header handling
+      const proxyUrl = buildHlsProxyUrl(streamUrl, {
+        referer: 'https://vidlink.pro/',
+        origin: 'https://vidlink.pro',
+        userAgent: DEFAULT_USER_AGENT,
+        maxRes: true,
       });
-      return resolved ? [resolved] : [];
+
+      const stream: Stream = {
+        url: proxyUrl,
+        name: `[Auto] ${SITE_CONFIG.name}`,
+        description: 'VidLink · Direct API',
+      };
+
+      db.set(cacheKey, stream, 1800); // Cache for 30 minutes
+      console.log(`[VidLink] Resolved stream: ${streamUrl}`);
+      return [stream];
     } catch (err) {
-      console.error(`[VidLink] getStreams failed for ${moviePage}:`, err);
+      console.error(`[VidLink] getStreams failed:`, err);
       return [];
     }
   }

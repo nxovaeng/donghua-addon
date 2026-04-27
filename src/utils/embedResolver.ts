@@ -1,36 +1,47 @@
 /**
- * Shared embed resolver for donghua sites (donghuaworld, donghuastream, animekhor).
+ * Shared embed resolver for MediaFlow extractors.
  *
- * Classifies iframe embed URLs by domain and resolves them to real
- * playable video URLs via the appropriate resolver.
+ * This module only handles video extractors supported by MediaFlow Proxy Light:
+ * https://mhdzumair.github.io/mediaflow-proxy-light/features/
+ *
+ * Other embed sources (VidLink, DonghuaPlanet, Rumble, Dailymotion) should be
+ * handled directly by their respective providers for better performance.
  */
 
 import { resolveDailymotionHLS } from './dailymotion';
 import { resolveDonghuaPlanet } from './donghuaplanet';
-// import { resolveOkRu } from './okru';  // 绑定ip 屏蔽了
 import { buildHlsProxyUrl, buildStreamProxyUrl, resolveViaMediaflowExtractor } from './mediaflow';
 import { Stream } from '../types';
-import { config } from '../config';
 import { db } from './db';
 
 const EXTRACTOR_MAP: Record<string, string> = {
-  'dood': 'doodstream', // Handles dood.watch, doodstream.com, etc
+  // MediaFlow Proxy Light - 24 Video Extractors
+  // https://mhdzumair.github.io/mediaflow-proxy-light/features/
+  'city': 'city',
+  'dood': 'doodstream',
+  'f16px': 'f16px',
+  'fastream': 'fastream',
   'filelions': 'filelions',
-  'mixdrop': 'mixdrop',
-  'streamtape': 'streamtape',
-  'vidoza': 'vidoza',
-  'streamwish': 'streamwish',
+  'filemoon': 'filemoon',
+  'gupload': 'gupload',
+  'livetv': 'livetv',
   'lulustream': 'lulustream',
-  'turbovidplay': 'turbovidplay',
   'maxstream': 'maxstream',
-  'uqload': 'uqload',
-  'ok.ru': 'okru', // IMPORTANT: Maps ok.ru to the 'okru' extractor
-  'voe': 'voe',
-  'vidmoly': 'vidmoly',
-  'vidlink': 'vidlink',
-  'vidlink.pro': 'vidlink',
+  'mixdrop': 'mixdrop',
+  'mp4upload': 'mp4upload',
+  'ok.ru': 'okru',
+  'sportsonline': 'sportsonline',
+  'streamtape': 'streamtape',
+  'streamwish': 'streamwish',
   'supervideo': 'supervideo',
-  'mp4upload': 'mp4upload'
+  'turbovidplay': 'turbovidplay',
+  'uqload': 'uqload',
+  'vavoo': 'vavoo',
+  'vidfast': 'vidfast',
+  'vidmoly': 'vidmoly',
+  'vidoza': 'vidoza',
+  'vixcloud': 'vixcloud',
+  'voe': 'voe',
 };
 
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
@@ -55,16 +66,16 @@ export async function resolveEmbed(
   const { siteUrl, serverLabel, providerName } = options;
 
   try {
-    // ── Dailymotion (standard embed) ─────────────────────────────────────
+     // ── Dailymotion (standard embed) ─────────────────────────────────────
     const dmMatch = embedUrl.match(/dailymotion\.com\/embed\/video\/([a-zA-Z0-9]+)/);
     if (dmMatch) {
-      return resolveDM(dmMatch[1], serverLabel, providerName);
+      return resolveDM(dmMatch[1], providerName);
     }
 
     // ── Dailymotion (geo player: geo.dailymotion.com/player/xxx?video=YYY) ─
     const geoMatch = embedUrl.match(/geo\.dailymotion\.com\/player\/[^?]+\?.*video=([a-zA-Z0-9]+)/);
     if (geoMatch) {
-      return resolveDM(geoMatch[1], serverLabel, providerName);
+      return resolveDM(geoMatch[1], providerName);
     }
 
     // ── Rumble direct embed (rumble.com/embed/xxx) ───────────────────────
@@ -91,28 +102,35 @@ export async function resolveEmbed(
     let hostname = '';
     try {
       hostname = new URL(embedUrl).hostname;
-    } catch (e) { }
-
-    const matchedKey = Object.keys(EXTRACTOR_MAP).find(key => hostname.includes(key));
-    if (matchedKey) {
-      const cacheKey = `resolved:${embedUrl}`;
-      const cached = db.get(cacheKey) as Stream | null;
-      if (cached) {
-        console.log(`[${providerName}] Returning cached extractor result for: ${hostname}`);
-        return cached;
-      }
-
-      const extractorName = EXTRACTOR_MAP[matchedKey];
-      const extracted = await resolveViaMediaflowExtractor(extractorName, embedUrl);
-      if (extracted) {
-        const stream = buildExtractorStreamResult(extracted, embedUrl, serverLabel, matchedKey);
-        db.set(cacheKey, stream, 1800); // Cache for 30 minutes
-        return stream;
-      }
+    } catch (e) {
+      return null;
     }
 
-    // ── Unknown embed — skip ─────────────────────────────────────────────
-    console.warn(`[${providerName}] Unknown embed domain, skipping: ${embedUrl}`);
+    // Check if this hostname is supported by MediaFlow extractors
+    const matchedKey = Object.keys(EXTRACTOR_MAP).find(key => hostname.includes(key));
+    if (!matchedKey) {
+      // Not a supported extractor host - let provider handle it directly
+      console.warn(`[${providerName}] Unknown embed domain, skipping: ${embedUrl}`);
+      return null;
+    }
+
+    const cacheKey = `resolved:${embedUrl}`;
+    const cached = db.get(cacheKey) as Stream | null;
+    if (cached) {
+      console.log(`[${providerName}] Returning cached extractor result for: ${hostname}`);
+      return cached;
+    }
+
+    const extractorName = EXTRACTOR_MAP[matchedKey];
+    const extracted = await resolveViaMediaflowExtractor(extractorName, embedUrl);
+    if (extracted) {
+      const stream = buildExtractorStreamResult(extracted, embedUrl, serverLabel, matchedKey);
+      db.set(cacheKey, stream, 1800); // Cache for 30 minutes
+      return stream;
+    }
+
+    // ── extractor failed ─────────────────────────────────────────────
+    console.warn(`[${providerName}] extractor failed for ${embedUrl}`);
     return null;
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
@@ -123,7 +141,7 @@ export async function resolveEmbed(
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-async function resolveDM(videoId: string, serverLabel: string, providerName: string): Promise<Stream | null> {
+export async function resolveDM(videoId: string, providerName: string): Promise<Stream | null> {
   const resolved = await resolveDailymotionHLS(videoId);
   if (!resolved) {
     console.warn(`[${providerName}] Could not resolve Dailymotion video: ${videoId}`);
@@ -136,7 +154,7 @@ async function resolveDM(videoId: string, serverLabel: string, providerName: str
       userAgent: DEFAULT_USER_AGENT,
       maxRes: true,
     }),
-    name: `[${resolved.quality}] ${serverLabel}`,
+    name: `[${resolved.quality}] ${providerName}`,
     description: `Dailymotion · via MediaFlow`,
   };
 }
@@ -167,6 +185,10 @@ function buildStreamResult(
   };
 }
 
+/**
+ * Build a stream result from extracted URL and metadata.
+ * Internal helper for MediaFlow extractor results.
+ */
 function buildExtractorStreamResult(
   extracted: { url: string; headers?: Record<string, string>; is_hls?: boolean },
   embedUrl: string,
@@ -181,12 +203,44 @@ function buildExtractorStreamResult(
   const origin = extracted.headers?.['Origin'] || extracted.headers?.['origin'] || new URL(embedUrl).origin;
 
   const proxyUrl = isHls
-    ? buildHlsProxyUrl(extracted.url, { referer, origin, userAgent })
+    ? buildHlsProxyUrl(extracted.url, { referer, origin, userAgent, maxRes: true })
     : buildStreamProxyUrl(extracted.url, { referer, origin, userAgent });
 
   return {
     url: proxyUrl,
     name: `[Auto] ${serverLabel}`,
     description: `${source.charAt(0).toUpperCase() + source.slice(1)} · via MediaFlow Extractor`,
+  };
+}
+
+/**
+ * Build a stream object from a resolved URL with quality and source info.
+ * Used by providers that handle their own embed resolution.
+ */
+export function buildStreamFromResolved(
+  resolved: { url: string; quality: string },
+  embedUrl: string,
+  serverLabel: string,
+  source: string,
+): Stream {
+  const isHls = resolved.url.includes('.m3u8');
+  const proxyUrl = isHls
+    ? buildHlsProxyUrl(resolved.url, {
+      referer: embedUrl,
+      origin: new URL(embedUrl).origin,
+      userAgent: DEFAULT_USER_AGENT,
+      maxRes: true,
+    })
+    : buildStreamProxyUrl(resolved.url, {
+      referer: embedUrl,
+      origin: new URL(embedUrl).origin,
+      userAgent: DEFAULT_USER_AGENT,
+      maxRes: true,
+    });
+
+  return {
+    url: proxyUrl,
+    name: `[${resolved.quality}] ${serverLabel}`,
+    description: `${source}`,
   };
 }

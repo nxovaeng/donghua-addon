@@ -1,6 +1,7 @@
 import { addonBuilder } from 'stremio-addon-sdk';
-import { movieAggregator, seriesAggregator, getAggregatorByProviderId, getAggregatorByType } from './core/aggregator';
+import { getAggregatorByName, getAggregatorByType, getAggregatorByProviderId } from './core/aggregator';
 import { metadataService } from './core/metadataService';
+import { allowedAccessTokens } from './config';
 
 const manifest = {
   id: 'community.aggregator.node',
@@ -33,15 +34,48 @@ const manifest = {
         { name: 'skip', isRequired: false }
       ]
     }
+  ],
+  behaviorHints: {
+    configurable: true,
+    configurationRequired: true,
+  },
+  config: [
+    {
+      key: 'accessToken',
+      type: 'password' as const,
+      title: '访问 Token',
+      required: true,
+    }
   ]
 };
 
 
 const builder = new addonBuilder(manifest);
 
-builder.defineStreamHandler(async ({ type, id }) => {
+function isValidAccessToken(config: any): boolean {
+  if (!Array.isArray(allowedAccessTokens) || allowedAccessTokens.length === 0) {
+    return false;
+  }
+  if (!config || typeof config.accessToken !== 'string') {
+    return false;
+  }
+  return allowedAccessTokens.includes(config.accessToken);
+}
+
+builder.defineStreamHandler(async (args: any) => {
+  const { type, id, config } = args;
   console.log(`[Addon] Stream request: ${type} ${id}`);
+  if (!isValidAccessToken(config)) {
+    console.warn('[Addon] Invalid access token for stream request');
+    return { streams: [] };
+  }
+
   let aggregatorRef = getAggregatorByType(type);
+
+  if (!aggregatorRef) {
+    console.error(`[Addon] No aggregator found for type: ${type}`);
+    return { streams: [] };
+  }
 
   if (id.startsWith('agg:')) {
     const providerId = id.slice('agg:'.length).split(':')[0];
@@ -59,6 +93,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
   if (id.startsWith('agg:')) {
     const providerId = id.slice('agg:'.length).split(':')[0];
     const aggregatorRef = getAggregatorByProviderId(providerId) || getAggregatorByType(type);
+    if (!aggregatorRef) return { meta: null };
     const meta = await aggregatorRef.getMeta(type, id);
     if (!meta) return { meta: null };
     return { meta };
@@ -83,8 +118,19 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
   console.log(`[Addon] Catalog request: ${type} ${id} ${JSON.stringify(extra)}`);
 
   let aggregatorRef = getAggregatorByType(type);
-  if (id === 'donghua_hot' || id === 'tmdb_popular') {
-    aggregatorRef = id === 'tmdb_popular' ? movieAggregator : seriesAggregator;
+
+  if (!aggregatorRef) {
+    console.error(`[Addon] No aggregator found for type: ${type}`);
+    return { metas: [] };
+  }
+
+  // 对特定目录使用专门的聚合器
+  if (id === 'donghua_hot') {
+    const donghuaAgg = getAggregatorByName('mainland-anime') || getAggregatorByName('mixed-anime');
+    if (donghuaAgg) aggregatorRef = donghuaAgg;
+  } else if (id === 'tmdb_popular') {
+    const movieAgg = getAggregatorByName('mainstream-movies');
+    if (movieAgg) aggregatorRef = movieAgg;
   }
 
   if (id === 'donghua_hot' || id === 'tmdb_popular' || (extra && extra.search)) {
