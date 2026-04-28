@@ -7,11 +7,6 @@ import { initializeAggregators } from './core/providerRegistry';
 async function start() {
   console.log('[Server] Initializing...');
 
-  if (!config.ENABLE_ADDON) {
-    console.log('[Server] Addon disabled by configuration. Exiting.');
-    process.exit(0);
-  }
-
   // 初始化所有聚合器
   initializeAggregators();
 

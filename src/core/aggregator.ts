@@ -103,7 +103,12 @@ export class Aggregator {
       const catalogPromises = this.providers.map(async (p) => {
         if (p.getCatalog) {
           try {
-            return await p.getCatalog(type, extra);
+            const metas = await p.getCatalog(type, extra);
+            const providerName = p.name;
+            return metas.map(m => ({
+              ...m,
+              description: m.description ? `${m.description} · ${providerName}` : providerName,
+            }));
           } catch (err) {
             console.error(`[Aggregator] Provider ${p.id} catalog failed:`, err);
             return [];
@@ -113,41 +118,32 @@ export class Aggregator {
       });
 
       const results = await Promise.all(catalogPromises);
-      const flattened = results.flat();
-      const seen = new Set<string>();
-      return flattened.filter(m => {
-        if (seen.has(m.name)) return false;
-        seen.add(m.name);
-        return true;
-      });
+      return results.flat();
     }
 
-    if (id === 'donghua_hot') {
-      const provider = this.providers.find(p => p.id === 'donghuaworld');
-      if (provider?.getCatalog) {
-        try {
-          return await provider.getCatalog(type, extra);
-        } catch (err) {
-          console.error(`[Aggregator] DonghuaWorld catalog failed:`, err);
-          return [];
+    if (id === this.name) {
+      const homeSource = this.config.homeSource || 'provider';
+      if (homeSource === 'tmdb') {
+        // Handle TMDB-specific logic
+        return [];
+      } else if (homeSource === 'douban') {
+        // Handle Douban-specific logic
+        return [];
+      } else {
+        // Default: aggregate from providers
+        const provider = this.providers[0]
+        if (provider?.getCatalog) {
+          try {
+            return await provider.getCatalog(type, extra);
+          } catch (err) {
+            console.error(`[Aggregator] DonghuaWorld catalog failed:`, err);
+            return [];
+          }
         }
+        return [];
       }
-      return [];
     }
-
-    if (id === 'tmdb_popular') {
-      const provider = this.providers.find(p => p.id === 'vidlink');
-      if (provider?.getCatalog) {
-        try {
-          return await provider.getCatalog(type, extra);
-        } catch (err) {
-          console.error(`[Aggregator] VidLink catalog failed:`, err);
-          return [];
-        }
-      }
-      return [];
-    }
-
+    
     return [];
   }
 

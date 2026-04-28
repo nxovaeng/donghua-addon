@@ -2,6 +2,7 @@ export interface MediaItem {
   id: string;
   type: 'movie' | 'series' | 'channel' | 'tv';
   title: string;
+  tmdbid?: string;
   aliases?: string[];
   year?: number;
   season?: number;
@@ -136,6 +137,7 @@ export interface AggregatorConfig {
   providerIds: string[];           // 该聚合器使用的供应商 ID 列表
   region?: 'mainland' | 'overseas' | 'auto'; // 地域标签
   priority?: number;               // 优先级（用于多聚合器场景）
+  homeSource?: 'tmdb' | 'douban' | 'provider'; // 元信息主页来源
 }
 
 /**

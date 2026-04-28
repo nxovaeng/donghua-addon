@@ -268,7 +268,7 @@ const vidlinkProvider: Provider = {
       }
     }
 
-    // Resolve VidLink API directly: https://vidlink.pro/movie/{tmdbId}.m3u8
+    // Resolve VidLink API play url: https://vidlink.pro/movie/{tmdbId}
     try {
       const apiUrl = item.type === 'movie'
         ? `${SITE_CONFIG.baseUrl}/movie/${movieId}`

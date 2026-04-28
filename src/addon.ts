@@ -1,5 +1,6 @@
 import { addonBuilder } from 'stremio-addon-sdk';
 import { getAggregatorByName, getAggregatorByType, getAggregatorByProviderId } from './core/aggregator';
+import { getEnabledAggregatorConfigs } from './core/providerRegistry';
 import { metadataService } from './core/metadataService';
 import { allowedAccessTokens } from './config';
 
@@ -7,7 +8,7 @@ const manifest = {
   id: 'community.aggregator.node',
   version: '1.0.0',
   name: '聚合搜索 (Node)',
-  description: '支持动漫、电影、电视剧的优质在线源聚合 (DonghuaFun/Donghuaworld/Animekhor/Donghuastream)',
+  description: '提供动漫、电影、电视剧的优质在线源聚合',
   resources: [
     'stream',
     'meta',
@@ -16,24 +17,15 @@ const manifest = {
   types: ['movie', 'series'],
   idPrefixes: ['tt', 'bgm', 'agg:'],
   catalogs: [
-    {
-      type: 'series',
-      id: 'donghua_hot',
-      name: '热门国漫',
+    ...getEnabledAggregatorConfigs().map(config => ({
+      type: config.supportedTypes[0],
+      id: config.name,
+      name: config.displayName,
       extra: [
         { name: 'search', isRequired: false },
         { name: 'skip', isRequired: false }
       ]
-    },
-    {
-      type: 'movie',
-      id: 'tmdb_popular',
-      name: 'TMDB 热门电影',
-      extra: [
-        { name: 'search', isRequired: false },
-        { name: 'skip', isRequired: false }
-      ]
-    }
+    }))
   ],
   behaviorHints: {
     configurable: true,
@@ -131,9 +123,14 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
   } else if (id === 'tmdb_popular') {
     const movieAgg = getAggregatorByName('mainstream-movies');
     if (movieAgg) aggregatorRef = movieAgg;
+  } else {
+    const namedAgg = getAggregatorByName(id);
+    if (namedAgg) {
+      aggregatorRef = namedAgg;
+    }
   }
 
-  if (id === 'donghua_hot' || id === 'tmdb_popular' || (extra && extra.search)) {
+  if (id === 'donghua_hot' || id === 'tmdb_popular' || getAggregatorByName(id) || (extra && extra.search)) {
     const metas = await aggregatorRef.getCatalog(type, id, extra);
     return { metas };
   }

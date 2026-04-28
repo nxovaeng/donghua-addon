@@ -5,6 +5,8 @@ import donghuaworldProvider from '../providers/donghuaworld';
 import netmirrorProvider from '../providers/netmirror';
 import superstreamProvider from '../providers/superstream';
 import vidlinkProvider from '../providers/vidlink';
+import dadaquProvider from '../providers/dadaqu';
+import pipishiProvider from '../providers/pipishi';
 import { Provider, AggregatorConfig } from '../types';
 import { registerAggregator } from './aggregator';
 import { activeAggregators } from '../config';
@@ -14,6 +16,8 @@ import { activeAggregators } from '../config';
  */
 export const movieProviders: Provider[] = [
   vidlinkProvider,
+  dadaquProvider,
+  pipishiProvider,
 ];
 
 export const seriesProviders: Provider[] = [
@@ -23,6 +27,8 @@ export const seriesProviders: Provider[] = [
   animekhorProvider,
   superstreamProvider,
   netmirrorProvider,
+  dadaquProvider,
+  pipishiProvider,
 ];
 
 export const providerMap = new Map<string, Provider>(
@@ -35,6 +41,12 @@ export function getProvidersByType(type: string): Provider[] {
 
 export function getProviderById(providerId: string): Provider | undefined {
   return providerMap.get(providerId);
+}
+
+export function getEnabledAggregatorConfigs(): AggregatorConfig[] {
+  return activeAggregators.length > 0
+    ? aggregatorConfigs.filter((config) => activeAggregators.includes(config.name))
+    : [...aggregatorConfigs];
 }
 
 /**
@@ -51,28 +63,37 @@ const aggregatorConfigs: AggregatorConfig[] = [
     priority: 100,
   },
   {
-    name: 'mainland-anime',
-    displayName: '大陆动漫',
+    name: 'hot-anime',
+    displayName: '热门动漫',
     supportedTypes: ['series'],
-    providerIds: ['donghuafun', 'donghuastream', 'donghuaworld'],
+    providerIds: ['donghuafun', 'donghuastream', 'donghuaworld', 'animekhor'],
     region: 'mainland',
     priority: 100,
   },
   {
-    name: 'mixed-anime',
-    displayName: '混合动漫',
-    supportedTypes: ['series'],
-    providerIds: ['donghuafun', 'donghuastream', 'donghuaworld', 'animekhor', 'superstream', 'netmirror'],
-    region: 'auto',
-    priority: 50,
-  },
-  {
-    name: 'mainstream-movies',
-    displayName: '主流电影',
+    name: 'hot-movies',
+    displayName: '热门电影',
     supportedTypes: ['movie'],
-    providerIds: ['vidlink'],
+    providerIds: ['superstream', 'vidlink'],
     region: 'auto',
     priority: 100,
+    homeSource: 'tmdb',
+  },
+  {
+    name: 'dadaqu',
+    displayName: 'Dadaqu 影视',
+    supportedTypes: ['movie', 'series'],
+    providerIds: ['dadaqu'],
+    region: 'mainland',
+    priority: 90,
+  },
+  {
+    name: 'pipishi',
+    displayName: 'PiPiShi 影视',
+    supportedTypes: ['movie', 'series'],
+    providerIds: ['pipishi'],
+    region: 'mainland',
+    priority: 80,
   },
 ];
 

@@ -320,6 +320,7 @@ const animekhorProvider: Provider = {
                     siteUrl: SITE_CONFIG.mainUrl,
                     serverLabel: e.label,
                     providerName: SITE_CONFIG.name,
+                    userAgent: DEFAULT_HEADERS['User-Agent'],
                 })
             );
             const resolved = await Promise.all(resolvePromises);

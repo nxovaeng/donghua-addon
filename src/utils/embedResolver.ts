@@ -28,7 +28,6 @@ const EXTRACTOR_MAP: Record<string, string> = {
   'lulustream': 'lulustream',
   'maxstream': 'maxstream',
   'mixdrop': 'mixdrop',
-  'mp4upload': 'mp4upload',
   'ok.ru': 'okru',
   'sportsonline': 'sportsonline',
   'streamtape': 'streamtape',
@@ -44,8 +43,6 @@ const EXTRACTOR_MAP: Record<string, string> = {
   'voe': 'voe',
 };
 
-const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-
 export interface EmbedResolveOptions {
   /** The originating site URL used as Referer */
   siteUrl: string;
@@ -53,6 +50,8 @@ export interface EmbedResolveOptions {
   serverLabel: string;
   /** Provider name for logging */
   providerName: string;
+  /** User agent used by the provider when resolving this embed */
+  userAgent?: string;
 }
 
 /**
@@ -69,13 +68,13 @@ export async function resolveEmbed(
      // ── Dailymotion (standard embed) ─────────────────────────────────────
     const dmMatch = embedUrl.match(/dailymotion\.com\/embed\/video\/([a-zA-Z0-9]+)/);
     if (dmMatch) {
-      return resolveDM(dmMatch[1], providerName);
+      return resolveDM(dmMatch[1], providerName, options.userAgent);
     }
 
     // ── Dailymotion (geo player: geo.dailymotion.com/player/xxx?video=YYY) ─
     const geoMatch = embedUrl.match(/geo\.dailymotion\.com\/player\/[^?]+\?.*video=([a-zA-Z0-9]+)/);
     if (geoMatch) {
-      return resolveDM(geoMatch[1], providerName);
+      return resolveDM(geoMatch[1], providerName, options.userAgent);
     }
 
     // ── Rumble direct embed (rumble.com/embed/xxx) ───────────────────────
@@ -85,7 +84,7 @@ export async function resolveEmbed(
         console.warn(`[${providerName}] Could not resolve Rumble embed: ${embedUrl}`);
         return null;
       }
-      return buildStreamResult(resolved, embedUrl, serverLabel, 'Rumble');
+      return buildStreamResult(resolved, embedUrl, serverLabel, 'Rumble', options.userAgent);
     }
 
     // ── DonghuaPlanet (Rumble-based JWPlayer) ────────────────────────────
@@ -95,7 +94,7 @@ export async function resolveEmbed(
         console.warn(`[${providerName}] Could not resolve DonghuaPlanet embed: ${embedUrl}`);
         return null;
       }
-      return buildStreamResult(resolved, embedUrl, serverLabel, 'Rumble');
+      return buildStreamResult(resolved, embedUrl, serverLabel, 'Rumble', options.userAgent);
     }
 
     // ── MediaFlow Extractor integration ────────────────────────────────────
@@ -124,7 +123,7 @@ export async function resolveEmbed(
     const extractorName = EXTRACTOR_MAP[matchedKey];
     const extracted = await resolveViaMediaflowExtractor(extractorName, embedUrl);
     if (extracted) {
-      const stream = buildExtractorStreamResult(extracted, embedUrl, serverLabel, matchedKey);
+      const stream = buildExtractorStreamResult(extracted, embedUrl, serverLabel, matchedKey, options.userAgent);
       db.set(cacheKey, stream, 1800); // Cache for 30 minutes
       return stream;
     }
@@ -141,7 +140,7 @@ export async function resolveEmbed(
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-export async function resolveDM(videoId: string, providerName: string): Promise<Stream | null> {
+export async function resolveDM(videoId: string, providerName: string, userAgent?: string): Promise<Stream | null> {
   const resolved = await resolveDailymotionHLS(videoId);
   if (!resolved) {
     console.warn(`[${providerName}] Could not resolve Dailymotion video: ${videoId}`);
@@ -151,7 +150,7 @@ export async function resolveDM(videoId: string, providerName: string): Promise<
     url: buildHlsProxyUrl(resolved.url, {
       referer: 'https://www.dailymotion.com/',
       origin: 'https://www.dailymotion.com',
-      userAgent: DEFAULT_USER_AGENT,
+      userAgent,
       maxRes: true,
     }),
     name: `[${resolved.quality}] ${providerName}`,
@@ -164,18 +163,19 @@ function buildStreamResult(
   embedUrl: string,
   serverLabel: string,
   source: string,
+  userAgent?: string,
 ): Stream {
   const isHls = resolved.url.includes('.m3u8');
   const proxyUrl = isHls
     ? buildHlsProxyUrl(resolved.url, {
       referer: embedUrl,
       origin: new URL(embedUrl).origin,
-      userAgent: DEFAULT_USER_AGENT,
+      userAgent,
     })
     : buildStreamProxyUrl(resolved.url, {
       referer: embedUrl,
       origin: new URL(embedUrl).origin,
-      userAgent: DEFAULT_USER_AGENT,
+      userAgent,
     });
 
   return {
@@ -194,17 +194,18 @@ function buildExtractorStreamResult(
   embedUrl: string,
   serverLabel: string,
   source: string,
+  userAgent?: string,
 ): Stream {
   const isHls = extracted.is_hls ?? extracted.url.includes('.m3u8');
 
   // Extract custom headers
   const referer = extracted.headers?.['Referer'] || extracted.headers?.['referer'] || embedUrl;
-  const userAgent = extracted.headers?.['User-Agent'] || extracted.headers?.['user-agent'] || DEFAULT_USER_AGENT;
+  const resolvedUserAgent = extracted.headers?.['User-Agent'] || extracted.headers?.['user-agent'] || userAgent;
   const origin = extracted.headers?.['Origin'] || extracted.headers?.['origin'] || new URL(embedUrl).origin;
 
   const proxyUrl = isHls
-    ? buildHlsProxyUrl(extracted.url, { referer, origin, userAgent, maxRes: true })
-    : buildStreamProxyUrl(extracted.url, { referer, origin, userAgent });
+    ? buildHlsProxyUrl(extracted.url, { referer, origin, userAgent: resolvedUserAgent, maxRes: true })
+    : buildStreamProxyUrl(extracted.url, { referer, origin, userAgent: resolvedUserAgent });
 
   return {
     url: proxyUrl,
@@ -222,19 +223,20 @@ export function buildStreamFromResolved(
   embedUrl: string,
   serverLabel: string,
   source: string,
+  userAgent?: string,
 ): Stream {
   const isHls = resolved.url.includes('.m3u8');
   const proxyUrl = isHls
     ? buildHlsProxyUrl(resolved.url, {
       referer: embedUrl,
       origin: new URL(embedUrl).origin,
-      userAgent: DEFAULT_USER_AGENT,
+      userAgent,
       maxRes: true,
     })
     : buildStreamProxyUrl(resolved.url, {
       referer: embedUrl,
       origin: new URL(embedUrl).origin,
-      userAgent: DEFAULT_USER_AGENT,
+      userAgent,
       maxRes: true,
     });
 

@@ -296,7 +296,7 @@ const donghuafunProvider: Provider = {
           const dmVideoId = parts[3];
           const resolved = await resolveDM(dmVideoId, SITE_CONFIG.name);
           if (resolved) {
-            return [];
+            return [resolved];
           }
           return [];
         }
