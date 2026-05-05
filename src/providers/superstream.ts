@@ -12,17 +12,23 @@ import { buildStreamProxyUrl } from '../utils/mediaflow';
  * Requires a valid FebBox "ui" cookie token (set via FEBBOX_TOKEN env var).
  *
  * Flow:
- *   1. Search by IMDB ID on the search site → get internal media ID
+ *   1. Search by TMDB ID or IMDB ID on the search site → get internal media ID
  *   2. Get share link for the media → share key
- *   3. List files under the share key → find matching episode
- *   4. Get video quality list with auth cookie → direct MP4 URLs
+ *   3. List files under the share key → find matching episode  (parallel with subtitles)
+ *   4. Get video quality list with auth cookie → direct MP4 URLs (parallel per file)
  */
 
 // ─── Configuration ───────────────────────────────────────────────────────────
-// These are the known API endpoints used by the CloudStream SuperStream extension
 const FEBBOX_API = 'https://www.febbox.com';
-const SHOWBOX_SEARCH = 'https://www.showbox.media'; // SUPERSTREAM_FOURTH_API equivalent
-const FEBBOX_FILE_API = 'https://www.febbox.com';    // SUPERSTREAM_THIRD_API equivalent
+const SHOWBOX_SEARCH = 'https://www.showbox.media';
+const FEBBOX_FILE_API = 'https://www.febbox.com';
+
+/** Timeout for each individual HTTP request (ms) */
+const REQUEST_TIMEOUT = 6000;
+/** Timeout for quality-list requests which may be slower (ms) */
+const QUALITY_TIMEOUT = 8000;
+
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
 
 function getToken(): string {
     const raw = config.FEBBOX_TOKEN || '';
@@ -58,8 +64,8 @@ async function searchByImdb(imdbId: string): Promise<{ mediaId: number; type: nu
     try {
         // Search page
         const searchRes = await axios.get(`${SHOWBOX_SEARCH}/search?keyword=${imdbId}`, {
-            timeout: 15000,
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+            timeout: REQUEST_TIMEOUT,
+            headers: { 'User-Agent': UA }
         });
 
         const $ = cheerio.load(searchRes.data);
@@ -71,8 +77,8 @@ async function searchByImdb(imdbId: string): Promise<{ mediaId: number; type: nu
 
         // Detail page to get the real media ID
         const detailRes = await axios.get(`${SHOWBOX_SEARCH}${firstLink}`, {
-            timeout: 15000,
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+            timeout: REQUEST_TIMEOUT,
+            headers: { 'User-Agent': UA }
         });
 
         const $2 = cheerio.load(detailRes.data);
@@ -93,6 +99,42 @@ async function searchByImdb(imdbId: string): Promise<{ mediaId: number; type: nu
 }
 
 /**
+ * Search ShowBox by TMDB ID to get the internal media ID.
+ * Uses the FebBox /index/share_link endpoint which accepts TMDB IDs directly.
+ */
+async function searchByTmdb(tmdbId: string, type: 'movie' | 'series'): Promise<{ mediaId: number; type: number } | null> {
+    const cacheKey = `ss:search:tmdb:${tmdbId}`;
+    const cached = db.get(cacheKey) as { mediaId: number; type: number } | null;
+    if (cached) return cached;
+
+    try {
+        // ShowBox uses TMDB IDs directly — the media ID IS the TMDB ID
+        // Type: 1=movie, 2=series
+        const mediaType = type === 'movie' ? 1 : 2;
+        const result = { mediaId: parseInt(tmdbId), type: mediaType };
+
+        // Verify by attempting to get the share link
+        const shareRes = await axios.get(`${SHOWBOX_SEARCH}/index/share_link`, {
+            params: { id: result.mediaId, type: mediaType },
+            timeout: REQUEST_TIMEOUT,
+            headers: { 'Accept-Language': 'en' }
+        });
+
+        const link = shareRes.data?.data?.link;
+        if (!link) {
+            console.warn(`[SuperStream] TMDB ID ${tmdbId} not found on ShowBox`);
+            return null;
+        }
+
+        db.set(cacheKey, result, 86400);
+        return result;
+    } catch (err) {
+        console.error('[SuperStream] TMDB search error:', err instanceof Error ? err.message : err);
+        return null;
+    }
+}
+
+/**
  * Get the share key for a media item.
  */
 async function getShareKey(mediaId: number, type: number): Promise<string | null> {
@@ -103,7 +145,7 @@ async function getShareKey(mediaId: number, type: number): Promise<string | null
     try {
         const res = await axios.get(`${SHOWBOX_SEARCH}/index/share_link`, {
             params: { id: mediaId, type },
-            timeout: 10000,
+            timeout: REQUEST_TIMEOUT,
             headers: { 'Accept-Language': 'en' }
         });
 
@@ -130,7 +172,7 @@ async function getFileList(
     try {
         const res = await axios.get(`${FEBBOX_FILE_API}/file/file_share_list`, {
             params: { share_key: shareKey },
-            timeout: 10000,
+            timeout: REQUEST_TIMEOUT,
             headers: { 'Accept-Language': 'en' }
         });
 
@@ -151,7 +193,7 @@ async function getFileList(
         // Get episode files
         const epRes = await axios.get(`${FEBBOX_FILE_API}/file/file_share_list`, {
             params: { share_key: shareKey, parent_id: seasonFolder.fid, page: 1 },
-            timeout: 10000,
+            timeout: REQUEST_TIMEOUT,
             headers: { 'Accept-Language': 'en' }
         });
 
@@ -189,7 +231,7 @@ async function getVideoQualities(
         const res = await axios.get(`${FEBBOX_FILE_API}/console/video_quality_list`, {
             params: { fid, share_key: shareKey },
             headers: { Cookie: token },
-            timeout: 15000
+            timeout: QUALITY_TIMEOUT
         });
 
         const htmlContent = res.data?.html;
@@ -231,7 +273,7 @@ async function getSubtitles(mediaId: number, type: number): Promise<Subtitle[]> 
     try {
         const res = await axios.get(`${SHOWBOX_SEARCH}/index/subtitles`, {
             params: { id: mediaId, type },
-            timeout: 10000,
+            timeout: REQUEST_TIMEOUT,
             headers: { 'Accept-Language': 'en' }
         });
 
@@ -278,46 +320,66 @@ const superstreamProvider: Provider = {
     weight: 100, // Highest priority — best quality source
 
     async getStreams(item: MediaItem): Promise<Stream[]> {
+        console.log(`[SuperStream] Requesting streams for: ${item.title} (ID: ${item.id})`);
+
         if (!config.FEBBOX_TOKEN) {
             return [];
         }
 
+        // ── Extract IDs from the MediaItem ──
         let imdbId = item.imdbid || '';
+        let tmdbId = item.tmdbid || '';
         const idParts = item.id.split(':');
+
         if (!imdbId && idParts[0]?.startsWith('tt')) {
             imdbId = idParts[0];
         }
+        if (!tmdbId && idParts[0]?.startsWith('tmdb')) {
+            tmdbId = idParts[0].replace('tmdb', '');
+        }
 
-        if (!imdbId) {
+        if (!imdbId && !tmdbId) {
+            console.warn('[SuperStream] No IMDB or TMDB ID available');
             return [];
         }
 
         try {
-            // Step 1: Search by IMDB ID
-            const searchResult = await searchByImdb(imdbId);
+            // ── Step 1: Resolve internal media ID ──
+            // Try TMDB first (faster, no scraping needed), fall back to IMDB
+            let searchResult: { mediaId: number; type: number } | null = null;
+
+            if (tmdbId) {
+                searchResult = await searchByTmdb(tmdbId, (item.type as 'movie' | 'series') || 'movie');
+            }
+            if (!searchResult && imdbId) {
+                searchResult = await searchByImdb(imdbId);
+            }
             if (!searchResult) return [];
 
-            // Step 2: Get share key
+            // ── Step 2: Get share key ──
             const shareKey = await getShareKey(searchResult.mediaId, searchResult.type);
             if (!shareKey) return [];
 
-            // Step 3: Get file list
-            const files = await getFileList(
-                shareKey,
-                item.type === 'series' ? item.season : undefined,
-                item.type === 'series' ? item.episode : undefined
-            );
+            // ── Step 3+4: File list & subtitles in PARALLEL ──
+            const [files, subtitles] = await Promise.all([
+                getFileList(
+                    shareKey,
+                    item.type === 'series' ? item.season : undefined,
+                    item.type === 'series' ? item.episode : undefined
+                ),
+                getSubtitles(searchResult.mediaId, searchResult.type)
+            ]);
 
             if (files.length === 0) return [];
 
-            // Step 4: Get subtitles
-            const subtitles = await getSubtitles(searchResult.mediaId, searchResult.type);
+            // ── Step 5: Get video qualities for ALL files in PARALLEL ──
+            const qualityResults = await Promise.all(
+                files.map(file => getVideoQualities(file.fid, shareKey))
+            );
 
-            // Step 5: Get video qualities for each file
             const streams: Stream[] = [];
-            for (const file of files) {
-                const qualities = await getVideoQualities(file.fid, shareKey);
-
+            for (let i = 0; i < files.length; i++) {
+                const qualities = qualityResults[i];
                 for (const q of qualities) {
                     const qualityNum = getQualityFromLabel(q.quality);
                     const qualityLabel = qualityNum ? `${qualityNum}p` : q.quality;

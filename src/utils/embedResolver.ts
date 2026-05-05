@@ -148,8 +148,8 @@ export async function resolveDM(videoId: string, providerName: string, userAgent
   }
   return {
     url: buildHlsProxyUrl(resolved.url, {
-      referer: 'https://www.dailymotion.com/',
-      origin: 'https://www.dailymotion.com',
+      referer: 'https://geo.dailymotion.com/',
+      origin: 'https://geo.dailymotion.com',
       userAgent,
       maxRes: true,
     }),

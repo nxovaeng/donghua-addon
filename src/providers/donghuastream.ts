@@ -34,12 +34,14 @@ const donghuastreamProvider: Provider = {
             const link = $(el).find('div.bsx > a');
             const title = link.attr('title') || link.text().trim();
             const href = link.attr('href') || '';
+            const poster = $(el).find('img').attr('src') || $(el).find('img').attr('data-src');
             if (title && href) {
                 results.push({ 
                     id: `agg:${SITE_CONFIG.id}:${href}`, 
                     type: 'series' as const, 
                     name: title,
-                    title: title 
+                    title: title,
+                    poster: poster,
                 });
             }
         });
@@ -159,7 +161,8 @@ const donghuastreamProvider: Provider = {
                 id: i.id, 
                 type: 'series' as const, 
                 name: i.title || i.name || 'Unknown',
-                title: i.title || i.name || 'Unknown'
+                title: i.title || i.name || 'Unknown',
+                poster: i.poster,
             }));
         }
         try {

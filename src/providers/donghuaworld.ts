@@ -61,12 +61,14 @@ const donghuaworldProvider: Provider = {
             const link = $(el).find('div.bsx > a');
             const title = link.attr('title') || link.text().trim();
             const href = link.attr('href') || '';
+            const poster = $(el).find('img').attr('src') || $(el).find('img').attr('data-src');
             if (title && href) {
                 results.push({
                     id: `agg:${SITE_CONFIG.id}:${href}`,
                     type: 'series',
                     title: title,
-                    name: title
+                    name: title,
+                    poster: poster,
                 });
             }
         });
@@ -81,6 +83,7 @@ const donghuaworldProvider: Provider = {
                 type: 'series' as const,
                 name: i.title || i.name || 'Unknown',
                 title: i.title || i.name || 'Unknown',
+                poster: i.poster,
             }));
         }
 

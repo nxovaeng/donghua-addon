@@ -271,6 +271,7 @@ const donghuafunProvider: Provider = {
       type: 'series' as const,
       name: m.name,
       title: m.name,
+      poster: m.poster
     }));
   },
 
